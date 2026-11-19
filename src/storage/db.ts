@@ -48,6 +48,7 @@ export async function getSettings(): Promise<ExtensionSettings> {
         ...DEFAULT_SETTINGS.enabledSources,
         ...(saved?.enabledSources ?? {}),
       },
+      customSites: Array.isArray(saved?.customSites) ? saved.customSites : [],
     };
   }
   return { ...DEFAULT_SETTINGS };
@@ -62,6 +63,9 @@ export async function saveSettings(partial: Partial<ExtensionSettings>): Promise
       ...current.enabledSources,
       ...(partial.enabledSources ?? {}),
     },
+    customSites: Array.isArray(partial.customSites)
+      ? partial.customSites
+      : current.customSites || [],
   };
   if (typeof chrome !== 'undefined' && chrome.storage?.local) {
     await chrome.storage.local.set({ [SETTINGS_STORAGE_KEY]: merged });

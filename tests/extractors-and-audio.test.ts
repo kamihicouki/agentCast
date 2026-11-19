@@ -315,4 +315,45 @@ describe('Audio WAV Wrapping & Script JSON Parsing', () => {
     const badRes = await verifyGeminiApiKey('sk-invalid-key-12345');
     expect(badRes.valid).toBe(false);
   });
+
+  it('extracts custom sites via CSS selector and parses Atom/RSS feeds', async () => {
+    const { extractByCssSelector, parseGenericRssOrAtomXml } = await import(
+      '../src/extractors/custom-site'
+    );
+
+    const doc = docFromHtml(
+      `
+      <main>
+        <div class="post-card">
+          <h2><a href="/posts/agent-ui">ブラウザ拡張のカスタム抽出ルール設計</a></h2>
+          <p>任意のCSSセレクタとRSSフィードを併用すると個人巡回が圧倒的に柔軟になります。</p>
+        </div>
+      </main>
+    `,
+      'https://example.dev/blog'
+    );
+    const cssItems = extractByCssSelector(doc, 'https://example.dev/blog', '.post-card', 'Example Dev');
+    expect(cssItems).toHaveLength(1);
+    expect(cssItems[0].title).toBe('ブラウザ拡張のカスタム抽出ルール設計');
+    expect(cssItems[0].url).toBe('https://example.dev/posts/agent-ui');
+    expect(cssItems[0].author).toBe('Example Dev');
+
+    const atomItems = parseGenericRssOrAtomXml(
+      `<?xml version="1.0" encoding="utf-8"?>
+      <feed xmlns="http://www.w3.org/2005/Atom">
+        <entry>
+          <title>Atom Feed Release Note</title>
+          <link rel="alternate" href="https://example.dev/releases/v2" />
+          <summary>Added custom site support and improved subtitle analysis.</summary>
+          <author><name>Dev Team</name></author>
+          <updated>2026-11-19T10:00:00Z</updated>
+        </entry>
+      </feed>`,
+      'Example Releases',
+      'https://example.dev/feed.xml'
+    );
+    expect(atomItems).toHaveLength(1);
+    expect(atomItems[0].title).toBe('Atom Feed Release Note');
+    expect(atomItems[0].url).toBe('https://example.dev/releases/v2');
+  });
 });

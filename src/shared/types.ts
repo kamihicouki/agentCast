@@ -1,44 +1,114 @@
 export type SourceId = 'x' | 'note' | 'zenn' | 'yahoo_news' | 'google_news' | 'generic';
 
+export type ExtractionStrategy = 'auto' | 'readability' | 'changelog' | 'css_selector' | 'rss';
+
+export interface CustomSiteConfig {
+  id: string;
+  name: string;
+  url: string;
+  enabled: boolean;
+  passiveEnabled: boolean;
+  extractionStrategy: ExtractionStrategy;
+  cssSelector?: string;
+  scrollSteps: number;
+  notes?: string;
+}
+
+export const EXTRACTION_STRATEGY_META: Record<
+  ExtractionStrategy,
+  { label: string; description: string }
+> = {
+  auto: {
+    label: '自動判定（推奨）',
+    description:
+      'URLやDOM構造から Changelog / サイト専用パーサー / Readability 本文抽出を自動選択します。',
+  },
+  readability: {
+    label: '記事本文抽出 (Readability)',
+    description:
+      'Mozilla Readability アルゴリズムでナビ・広告・フッターを除外し、記事本文テキストのみを抽出します。',
+  },
+  changelog: {
+    label: 'リリースノート (Changelog)',
+    description:
+      'アクティブなタブパネル内のバージョン見出し・変更リスト・折りたたみ詳細をリリース単位で構造化抽出します。',
+  },
+  css_selector: {
+    label: 'CSSセレクタ指定',
+    description:
+      '指定した CSS セレクタ（例: article, .post-card）に一致する各要素からタイトル・リンク・本文を抽出します。',
+  },
+  rss: {
+    label: 'RSS / Atom フィード',
+    description:
+      'タブを開かずに XML フィードを直接 fetch して <item>/<entry> を高速収集します（ログイン不要な公開サイト向け）。',
+  },
+};
+
 export const SOURCE_META: Record<
   SourceId,
-  { label: string; shortLabel: string; startUrl: string; description: string }
+  {
+    label: string;
+    shortLabel: string;
+    startUrl: string;
+    description: string;
+    extractionMethod: string;
+    extractionDetail: string;
+  }
 > = {
   x: {
     label: 'X (フォロー中 / Home)',
     shortLabel: 'X.com',
     startUrl: 'https://x.com/home',
     description: 'ログイン中のタイムラインから広告を除いて注目ポストと引用リンクを抽出',
+    extractionMethod: 'DOM解析 + 2回スクロール + 広告除外',
+    extractionDetail:
+      'article[data-testid="tweet"] から本文・著者・エンゲージメント数・引用URLを取得。「プロモーション/Ad」マーカー付き投稿は除外します。',
   },
   note: {
     label: 'Note (フォロー新着・購読記事)',
     shortLabel: 'Note',
     startUrl: 'https://note.com/',
     description: 'フォロー中クリエイターの記事や購入済み・メンバーシップ記事本文を抽出',
+    extractionMethod: 'DOM解析 + 記事本文展開',
+    extractionDetail:
+      '一覧カードから記事URLを収集し、上位記事の .note-common-styles__textnote-body を展開して本文を取得します。',
   },
   zenn: {
     label: 'Zenn (トレンド & フィード)',
     shortLabel: 'Zenn',
     startUrl: 'https://zenn.dev/',
     description: '技術トレンドRSSとログイン中フィードを取得（コードブロックは要点化）',
+    extractionMethod: 'RSS先行取得 + DOM本文展開（コード要約）',
+    extractionDetail:
+      'zenn.dev/feed のRSSを高速取得しつつ、記事ページの .znc 本文を抽出。読み上げにくい <pre><code> は言語名と概要に置換します。',
   },
   yahoo_news: {
     label: 'Yahoo!ニュース (主要・マイニュース)',
     shortLabel: 'Yahoo!',
     startUrl: 'https://news.yahoo.co.jp/',
     description: '主要トピックスからピックアップ経由で元記事本文を解決・収集',
+    extractionMethod: 'ピックアップ → 元記事URL追跡',
+    extractionDetail:
+      'トピックス一覧から pickup ページを経由し「記事全文を読む」リンク先の /articles/ 本文を自動取得します。',
   },
   google_news: {
     label: 'Google News (おすすめ・フォロー中)',
     shortLabel: 'GNews',
     startUrl: 'https://news.google.com/',
     description: 'Googleアカウント連動のパーソナライズ報道クラスターを収集',
+    extractionMethod: 'ログイン中DOM解析（見出し＋媒体名）',
+    extractionDetail:
+      'ログイン済み Google News 画面の <article> カードから報道タイトル・媒体名・日時を構造化収集します。',
   },
   generic: {
-    label: '開いているWeb記事 (Readability)',
+    label: 'カスタムサイト / 開いているWeb記事',
     shortLabel: 'Web',
     startUrl: '',
-    description: '任意のニュース・ブログ・有料メルマガ等を現在のタブから本文抽出',
+    description: '任意のニュース・ブログ・Changelog・RSS等を自動抽出またはルール指定で収集',
+    extractionMethod: '自動判定 (Changelog / Readability / CSS / RSS)',
+    extractionDetail:
+      'ページ構造に応じて Changelog 専用パーサーや Mozilla Readability でノイズを除いた本文を抽出します。',
   },
 };
 
@@ -146,6 +216,7 @@ export interface ExtensionSettings {
   openaiModel: string;
   targetDurationMin: 5 | 10 | 15;
   enabledSources: Record<SourceId, boolean>;
+  customSites: CustomSiteConfig[];
   maxItemsPerPatrol: number;
   passiveCaptureEnabled: boolean;
   autoScheduleEnabled: boolean;
@@ -175,6 +246,7 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
     google_news: true,
     generic: true,
   },
+  customSites: [],
   maxItemsPerPatrol: 24,
   passiveCaptureEnabled: true,
   autoScheduleEnabled: false,

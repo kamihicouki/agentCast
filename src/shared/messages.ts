@@ -2,10 +2,17 @@ import type {
   BuildMeta,
   ExtractedCandidate,
   ExtensionSettings,
+  ExtractionStrategy,
   PlaybackState,
   PodcastEpisode,
   SourceId,
 } from './types';
+
+export interface CustomExtractRule {
+  strategy: ExtractionStrategy;
+  cssSelector?: string;
+  siteName?: string;
+}
 
 export interface ExtractionResultPayload {
   blocked: boolean;
@@ -19,6 +26,7 @@ export type RuntimeRequest =
   | { type: 'CAPTURE_AND_GENERATE_ACTIVE_TAB' }
   | { type: 'PATROL_SOURCES'; sources?: SourceId[] }
   | { type: 'PATROL_AND_GENERATE'; sources?: SourceId[] }
+  | { type: 'PATROL_CUSTOM_SITE'; siteId: string; generateAfter?: boolean }
   | { type: 'LIST_TAB_GROUPS' }
   | { type: 'PATROL_TAB_GROUP'; groupId: number; generateAfter?: boolean }
   | { type: 'GENERATE_EPISODE_FROM_QUEUE' }
@@ -27,7 +35,7 @@ export type RuntimeRequest =
   | { type: 'GET_JOB_STATUS' }
   | { type: 'CREATE_DEMO_EPISODE' }
   | { type: 'PASSIVE_CANDIDATES'; candidates: ExtractedCandidate[]; pageUrl: string }
-  | { type: 'CONTENT_EXTRACT_NOW'; scrollSteps?: number }
+  | { type: 'CONTENT_EXTRACT_NOW'; scrollSteps?: number; customRule?: CustomExtractRule }
   | {
       type: 'WEB_LLM_PROMPT';
       provider: 'chatgpt' | 'gemini';

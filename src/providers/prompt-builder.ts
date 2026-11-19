@@ -55,14 +55,15 @@ ${bodySnippet}`;
 
 ## 番組構成ルール
 1. 同じニュースや関連する話題（例：Yahoo!/Googleニュースの報道とXでの反応、ZennとNoteの類似技術テーマ、同一プロダクトの複数リリースノート）は分かりやすくチャプターに整理・統合し、多角的に紹介してください。
-2. 英語の記事やリリースノート（Changelog等）が含まれる場合は、**必ず自然な日本語で噛み砕いて解説**してください。バージョン番号やスラッシュコマンド（例: v2.33.0 → バージョン2.33.0、/swarm → スウォームコマンド、SSH → エスエスエイチ）は \`spokenText\` で滑らかに発音できる表記にしてください。
-3. 全体で ${targetChapters} のトピックチャプター（先頭の短いオープニング挨拶を含む）に編成し、各チャプターは ${turnsPerChapter} のテンポ良い会話にしてください。
-4. 音声合成（TTS）で読み上げた際に不自然にならないよう、URL文字列や絵文字はセリフに含めず、難読英単語・略語（例: Vite→ヴィート、PR→プルリクエスト、LLM→エルエルエム）を自然に読める日本語表記を \`spokenText\` に入れてください（通常の字幕表示用は \`text\`）。
-5. 出力は**必ず以下のJSONスキーマのみ**（Markdownのコードブロック装飾や前置き文なし）で返してください。
+2. **タイトルとサブタイトルの差別化（重要）**：毎回同じ「○月○日 午後のテック＆トレンドダイジェスト」のような汎用タイトルは使わず、**その回の中心トピック・固有名詞を含めた一目で区別できるタイトル**にしてください。また \`subtitle\` には収集内容を解析した**主要トピック2〜3件の要点サマリー（45〜70文字程度）**を必ず入れてください。
+3. 英語の記事やリリースノート（Changelog等）が含まれる場合は、**必ず自然な日本語で噛み砕いて解説**してください。バージョン番号やスラッシュコマンド（例: v2.33.0 → バージョン2.33.0、/swarm → スウォームコマンド、SSH → エスエスエイチ）は \`spokenText\` で滑らかに発音できる表記にしてください。
+4. 全体で ${targetChapters} のトピックチャプター（先頭の短いオープニング挨拶を含む）に編成し、各チャプターは ${turnsPerChapter} のテンポ良い会話にしてください。
+5. 音声合成（TTS）で読み上げた際に不自然にならないよう、URL文字列や絵文字はセリフに含めず、難読英単語・略語（例: Vite→ヴィート、PR→プルリクエスト、LLM→エルエルエム）を自然に読める日本語表記を \`spokenText\` に入れてください（通常の字幕表示用は \`text\`）。
+6. 出力は**必ず以下のJSONスキーマのみ**（Markdownのコードブロック装飾や前置き文なし）で返してください。
 
 {
-  "title": "番組タイトル（例：11月18日 朝のトレンド＆テックダイジェスト）",
-  "subtitle": "取り上げる主要トピックの1行サマリー",
+  "title": "内容が一目で分かる固有の番組タイトル（例：LINE Dev Community移行＆Gemini 4 Neon解説）",
+  "subtitle": "内容を解析した主要トピック要約（例：L-Developer Community自立運営への移行、SSHリモート接続対応、最新AIエージェント動向）",
   "chapters": [
     {
       "title": "チャプター見出し",
@@ -149,9 +150,24 @@ export function parseGeneratedScriptJson(
     };
   });
 
+  const topicTitles = chapters
+    .map((c) => c.title.trim())
+    .filter((t) => t && !/^(オープニング|導入|エンディング|まとめ)[:：]?$/i.test(t));
+
+  const rawSubtitle = (parsed.subtitle || '').trim();
+  const isGenericSubtitle =
+    !rawSubtitle ||
+    rawSubtitle.length < 10 ||
+    /件の新着トピックから編成|トレンド＆テックダイジェスト/.test(rawSubtitle);
+
+  const derivedSubtitle =
+    !isGenericSubtitle
+      ? rawSubtitle
+      : topicTitles.slice(0, 3).join(' / ') || `${sourceItems.length}件の新着トピックから編成`;
+
   return {
-    title: parsed.title || 'agentCast パーソナルダイジェスト',
-    subtitle: parsed.subtitle || `${sourceItems.length}件の新着トピックから編成`,
+    title: parsed.title || topicTitles[0] || 'agentCast パーソナルダイジェスト',
+    subtitle: derivedSubtitle,
     chapters,
   };
 }

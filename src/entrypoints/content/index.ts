@@ -1,10 +1,17 @@
 import { extractFromDocument } from '../../extractors';
-import type { ExtractionResultPayload, RuntimeRequest } from '../../shared/messages';
+import type {
+  CustomExtractRule,
+  ExtractionResultPayload,
+  RuntimeRequest,
+} from '../../shared/messages';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function gentleScrollAndExtract(scrollSteps = 0): Promise<ExtractionResultPayload> {
-  const firstPass = extractFromDocument(document, window.location.href);
+async function gentleScrollAndExtract(
+  scrollSteps = 0,
+  customRule?: CustomExtractRule
+): Promise<ExtractionResultPayload> {
+  const firstPass = extractFromDocument(document, window.location.href, customRule);
   if (firstPass.blocked || scrollSteps <= 0) {
     return firstPass;
   }
@@ -17,7 +24,7 @@ async function gentleScrollAndExtract(scrollSteps = 0): Promise<ExtractionResult
     window.scrollBy({ top: Math.round(window.innerHeight * 0.82), behavior: 'smooth' });
     await sleep(jitter);
 
-    const pass = extractFromDocument(document, window.location.href);
+    const pass = extractFromDocument(document, window.location.href, customRule);
     if (pass.blocked) {
       return pass;
     }
@@ -42,7 +49,7 @@ if (!win.__agentCastContentReady__) {
 
   chrome.runtime.onMessage.addListener((message: RuntimeRequest, _sender, sendResponse) => {
     if (message?.type === 'CONTENT_EXTRACT_NOW') {
-      void gentleScrollAndExtract(message.scrollSteps ?? 0).then(sendResponse);
+      void gentleScrollAndExtract(message.scrollSteps ?? 0, message.customRule).then(sendResponse);
       return true;
     }
     return false;

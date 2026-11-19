@@ -10,6 +10,7 @@ import {
 import {
   INITIAL_PLAYBACK_STATE,
   SOURCE_META,
+  type CustomSiteConfig,
   type ExtractedCandidate,
   type ExtensionSettings,
   type FeedItem,
@@ -18,8 +19,13 @@ import {
   type SourceId,
   type TabGroupSummary,
 } from '../../shared/types';
-import type { ExtractionResultPayload, RuntimeRequest } from '../../shared/messages';
+import type {
+  CustomExtractRule,
+  ExtractionResultPayload,
+  RuntimeRequest,
+} from '../../shared/messages';
 import { parseZennRssXml } from '../../extractors/zenn';
+import { parseGenericRssOrAtomXml } from '../../extractors/custom-site';
 import { createDemoEpisode } from '../../providers/prompt-builder';
 import {
   generateScriptWithGemini,
@@ -249,9 +255,40 @@ async function waitForTabReady(tabId: number, timeoutMs = 16000): Promise<void> 
   }
 }
 
+// Automatically inject content.js on user-added custom sites with passiveEnabled
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status !== 'complete' || !tab.url || !tab.url.startsWith('http')) return;
+  void (async () => {
+    const settings = await getSettings();
+    if (!settings.passiveCaptureEnabled || !settings.customSites?.length) return;
+    const matched = settings.customSites.find(
+      (s) => s.enabled && s.passiveEnabled && s.extractionStrategy !== 'rss' && urlMatchesCustomSite(tab.url!, s.url)
+    );
+    if (!matched) return;
+    try {
+      await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] });
+    } catch {
+      // Restricted page or tab closed
+    }
+  })();
+});
+
+function urlMatchesCustomSite(tabUrl: string, siteUrl: string): boolean {
+  try {
+    const a = new URL(tabUrl);
+    const b = new URL(siteUrl);
+    if (a.hostname !== b.hostname) return false;
+    const prefix = b.pathname.replace(/\/+$/, '');
+    return !prefix || a.pathname.startsWith(prefix);
+  } catch {
+    return false;
+  }
+}
+
 async function extractFromTab(
   tabId: number,
-  scrollSteps = 0
+  scrollSteps = 0,
+  customRule?: CustomExtractRule
 ): Promise<ExtractionResultPayload> {
   try {
     await chrome.scripting.executeScript({
@@ -266,6 +303,7 @@ async function extractFromTab(
     .sendMessage(tabId, {
       type: 'CONTENT_EXTRACT_NOW',
       scrollSteps,
+      customRule,
     } satisfies RuntimeRequest)
     .catch(() => null)) as ExtractionResultPayload | null;
 
@@ -452,6 +490,55 @@ async function patrolSources(requestedSources?: SourceId[]): Promise<{
         await sleep(700 + Math.floor(Math.random() * 500));
       }
 
+      // 2.5. Patrol user-added custom sites (DOM / Changelog / Readability / CSS selector)
+      const activeCustomSites = (settings.customSites || []).filter(
+        (s) => s.enabled && s.url.trim().startsWith('http')
+      );
+
+      for (const site of activeCustomSites) {
+        if (site.extractionStrategy === 'rss') {
+          try {
+            updateJobProgress(`RSS取得中: ${site.name}...`);
+            const rssRes = await fetch(site.url);
+            if (rssRes.ok) {
+              const xml = await rssRes.text();
+              const rssCandidates = parseGenericRssOrAtomXml(xml, site.name, site.url);
+              const saved = await ingestCandidates(rssCandidates);
+              totalInserted += saved.inserted;
+              broadcastEvent({ type: 'QUEUE_UPDATED' });
+            } else {
+              warnings.push(`${site.name}: RSS取得エラー (HTTP ${rssRes.status})`);
+            }
+          } catch (rssErr) {
+            warnings.push(
+              `${site.name}: RSS取得失敗 (${rssErr instanceof Error ? rssErr.message : String(rssErr)})`
+            );
+          }
+          continue;
+        }
+
+        updateJobProgress(`カスタムサイト巡回中: ${site.name}...`);
+        await chrome.tabs.update(patrolTabId, { url: site.url });
+        await waitForTabReady(patrolTabId, 16000);
+        await sleep(1600);
+
+        const extracted = await extractFromTab(patrolTabId, site.scrollSteps ?? 0, {
+          strategy: site.extractionStrategy,
+          cssSelector: site.cssSelector,
+          siteName: site.name,
+        });
+
+        if (extracted.blocked) {
+          warnings.push(`${site.name}: ${extracted.blockMessage || 'スキップしました'}`);
+          continue;
+        }
+
+        const saved = await ingestCandidates(extracted.candidates.slice(0, 12));
+        totalInserted += saved.inserted;
+        broadcastEvent({ type: 'QUEUE_UPDATED' });
+        await sleep(600);
+      }
+
       // 3. Expand top 4 headline/pickup items (e.g. Yahoo! Pickup -> Full Article, Note/Zenn body)
       for (const target of deepFetchQueue.slice(0, 4)) {
         updateJobProgress(`注目記事の本文を展開中: ${target.title.slice(0, 28)}…`);
@@ -486,6 +573,68 @@ async function patrolSources(requestedSources?: SourceId[]): Promise<{
 
   broadcastEvent({ type: 'QUEUE_UPDATED' });
   return { inserted: totalInserted, warnings };
+}
+
+async function patrolSingleCustomSite(site: CustomSiteConfig): Promise<{
+  inserted: number;
+  items: FeedItem[];
+  warnings: string[];
+}> {
+  const warnings: string[] = [];
+  if (site.extractionStrategy === 'rss') {
+    updateJobProgress(`RSS取得中: ${site.name}...`);
+    const rssRes = await fetch(site.url);
+    if (!rssRes.ok) {
+      throw new Error(`${site.name} のRSS取得に失敗しました (HTTP ${rssRes.status})`);
+    }
+    const xml = await rssRes.text();
+    const candidates = parseGenericRssOrAtomXml(xml, site.name, site.url);
+    const saved = await ingestCandidates(candidates);
+    broadcastEvent({ type: 'QUEUE_UPDATED' });
+    return { inserted: saved.inserted, items: saved.items, warnings };
+  }
+
+  const patrolTab = await chrome.tabs.create({ url: site.url, active: false });
+  const tabId = patrolTab.id;
+  if (!tabId) {
+    throw new Error('巡回タブを作成できませんでした。');
+  }
+
+  try {
+    if (chrome.tabs.group && chrome.tabGroups?.update) {
+      try {
+        const groupId = await chrome.tabs.group({ tabIds: [tabId] });
+        await chrome.tabGroups.update(groupId, {
+          title: PATROL_GROUP_TITLE,
+          color: 'orange',
+          collapsed: false,
+        });
+      } catch {
+        // Ignore
+      }
+    }
+
+    updateJobProgress(`カスタムサイト取得中: ${site.name}...`);
+    await waitForTabReady(tabId, 16000);
+    await sleep(1500);
+
+    const extracted = await extractFromTab(tabId, site.scrollSteps ?? 0, {
+      strategy: site.extractionStrategy,
+      cssSelector: site.cssSelector,
+      siteName: site.name,
+    });
+
+    if (extracted.blocked) {
+      warnings.push(`${site.name}: ${extracted.blockMessage || 'ブロック検知'}`);
+      return { inserted: 0, items: [], warnings };
+    }
+
+    const saved = await ingestCandidates(extracted.candidates.slice(0, 14));
+    broadcastEvent({ type: 'QUEUE_UPDATED' });
+    return { inserted: saved.inserted, items: saved.items, warnings };
+  } finally {
+    await chrome.tabs.remove(tabId).catch(() => {});
+  }
 }
 
 function getProviderLabels(settings: ExtensionSettings): {
@@ -896,6 +1045,24 @@ chrome.runtime.onMessage.addListener((message: RuntimeRequest, _sender, sendResp
       })();
       return true;
 
+    case 'PATROL_CUSTOM_SITE':
+      if (isJobRunning) {
+        sendResponse({ ok: false, error: '現在別の巡回・番組生成が実行中です。' });
+        return false;
+      }
+      sendResponse({ ok: true, started: true });
+      void runBackgroundJob('カスタムサイトを読み取り中...', async () => {
+        const settings = await getSettings();
+        const site = (settings.customSites || []).find((s) => s.id === message.siteId);
+        if (!site) throw new Error('指定されたカスタムサイトが見つかりません。');
+        const res = await patrolSingleCustomSite(site);
+        if (message.generateAfter && res.items.length > 0) {
+          await generateEpisodeFromItems(res.items);
+        }
+        return { warnings: res.warnings };
+      });
+      return false;
+
     case 'START_GEMINI_KEY_SETUP':
       void startGeminiKeySetup()
         .then((tabId) => sendResponse({ ok: true, tabId }))
@@ -962,7 +1129,7 @@ async function startGeminiKeySetup(): Promise<number | undefined> {
     }
   };
 
-  // Re-inject automatically if user completes Google sign-in and redirects back to AI Studio
+  // Re-inject automatically when AI Studio finishes loading or redirects back after sign-in
   const onUpdated = (updatedTabId: number, changeInfo: chrome.tabs.TabChangeInfo) => {
     if (updatedTabId === tabId && changeInfo.status === 'complete') {
       setTimeout(() => void tryInject(), 900);
@@ -982,8 +1149,12 @@ async function startGeminiKeySetup(): Promise<number | undefined> {
   chrome.tabs.onRemoved.addListener(onRemoved);
   setTimeout(cleanup, 5 * 60 * 1000);
 
-  await waitForTabReady(tabId, 16000);
-  await sleep(1000);
-  await tryInject();
+  // Inject asynchronously so sendResponse({ ok: true, tabId }) returns IMMEDIATELY without timing out!
+  void (async () => {
+    await waitForTabReady(tabId, 16000);
+    await sleep(1000);
+    await tryInject();
+  })();
+
   return tabId;
 }

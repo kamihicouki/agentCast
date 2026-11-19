@@ -1,7 +1,18 @@
 import type { BuildMeta } from '../../shared/types';
 import type { DevBuildStatus } from '../../shared/messages';
 
-let initialBuild: BuildMeta | null = null;
+const RUNNING_BUILD_ID =
+  typeof __AGENTCAST_BUILD_ID__ !== 'undefined' ? __AGENTCAST_BUILD_ID__ : '';
+
+let currentBuild: BuildMeta | null = RUNNING_BUILD_ID
+  ? {
+      buildId: RUNNING_BUILD_ID,
+      contentHash: '',
+      builtAt: '',
+      target: 'main',
+      version: '0.1.0',
+    }
+  : null;
 let pendingBuild: BuildMeta | null = null;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -18,38 +29,40 @@ async function fetchDiskBuildMeta(): Promise<BuildMeta | null> {
 
 export function getDevBuildStatus(): DevBuildStatus {
   return {
-    currentBuild: initialBuild,
+    currentBuild,
     pendingBuild,
   };
 }
 
 /**
  * Watches build-meta.json on local disk (updated via Google Drive sync, git pull, or pnpm dev).
- * Automatically calls chrome.runtime.reload() when idle so cloud updates appear in local Chrome immediately,
- * while holding reload safely if podcast audio is currently playing.
+ * Compares against compile-time __AGENTCAST_BUILD_ID__ so even if the Service Worker slept during
+ * a Drive sync, waking up immediately detects the newer disk build and triggers chrome.runtime.reload().
  */
-export function startDevAutoReloader(isAudioPlayingFn: () => boolean): void {
+export function startDevAutoReloader(isBusyFn: () => boolean): void {
   if (!__DEV_AUTO_RELOAD__) return;
   if (pollTimer) return;
 
-  void fetchDiskBuildMeta().then((meta) => {
-    initialBuild = meta;
-  });
-
-  pollTimer = setInterval(async () => {
+  const checkForUpdate = async () => {
     const latest = await fetchDiskBuildMeta();
     if (!latest) return;
 
-    if (!initialBuild) {
-      initialBuild = latest;
+    if (!RUNNING_BUILD_ID) {
+      if (!currentBuild) {
+        currentBuild = latest;
+        return;
+      }
+    } else if (latest.buildId === RUNNING_BUILD_ID) {
+      currentBuild = latest;
       return;
     }
 
-    if (latest.buildId !== initialBuild.buildId) {
+    const activeId = RUNNING_BUILD_ID || currentBuild?.buildId;
+    if (activeId && latest.buildId !== activeId) {
       pendingBuild = latest;
-      if (!isAudioPlayingFn()) {
+      if (!isBusyFn()) {
         console.log(
-          `[agentCast dev-reloader] New build detected (${latest.buildId}). Reloading extension...`
+          `[agentCast dev-reloader] New build detected (${activeId} -> ${latest.buildId}). Reloading extension...`
         );
         chrome.runtime.reload();
       } else {
@@ -61,5 +74,11 @@ export function startDevAutoReloader(isAudioPlayingFn: () => boolean): void {
           .catch(() => {});
       }
     }
+  };
+
+  // Check immediately on SW wakeup, then every 3.5 seconds while awake
+  void checkForUpdate();
+  pollTimer = setInterval(() => {
+    void checkForUpdate();
   }, 3500);
 }

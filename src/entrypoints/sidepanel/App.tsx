@@ -2,10 +2,13 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { db, getSettings, getUnreadQueue } from '../../storage/db';
 import {
   DEFAULT_SETTINGS,
+  EXTRACTION_STRATEGY_META,
   INITIAL_PLAYBACK_STATE,
   SOURCE_META,
   type BuildMeta,
+  type CustomSiteConfig,
   type ExtensionSettings,
+  type ExtractionStrategy,
   type FeedItem,
   type PlaybackState,
   type PodcastEpisode,
@@ -32,6 +35,60 @@ function formatSec(sec: number): string {
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
+function formatEpisodeTimestamp(iso?: string): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  return `${y}/${m}/${day} ${hh}:${mm}`;
+}
+
+function deriveEpisodeSubtitle(ep: PodcastEpisode): string {
+  const raw = (ep.subtitle || '').trim();
+  const isGeneric =
+    !raw ||
+    raw.length < 10 ||
+    /件の新着(記事|SNS|トピック)|トレンド＆テックダイジェスト|整理しています/.test(raw);
+  if (!isGeneric) return raw;
+
+  const topicTitles = (ep.chapters || [])
+    .map((c) => c.title.trim())
+    .filter(
+      (t) =>
+        t &&
+        !/^(オープニング|導入|エンディング|まとめ)[:：]?$/i.test(t) &&
+        !t.startsWith('オープニング：')
+    );
+
+  if (topicTitles.length > 0) {
+    return topicTitles.slice(0, 3).join(' ／ ');
+  }
+  return raw || `${ep.sourceCount}件のソースから編成`;
+}
+
+function formatEpisodeOptionLabel(ep: PodcastEpisode): string {
+  const ts = formatEpisodeTimestamp(ep.createdAt);
+  const sub = deriveEpisodeSubtitle(ep);
+  const compactSub = sub.length > 34 ? `${sub.slice(0, 33)}…` : sub;
+  const compactTitle = ep.title.length > 26 ? `${ep.title.slice(0, 25)}…` : ep.title;
+  return `${ts ? `[${ts}] ` : ''}${compactTitle}${compactSub ? ` — ${compactSub}` : ''}`;
+}
+
+const EMPTY_SITE_DRAFT: Omit<CustomSiteConfig, 'id'> = {
+  name: '',
+  url: '',
+  enabled: true,
+  passiveEnabled: true,
+  extractionStrategy: 'auto',
+  cssSelector: '',
+  scrollSteps: 0,
+  notes: '',
+};
+
 export function App() {
   const [tab, setTab] = useState<ActiveTab>('player');
   const [episodes, setEpisodes] = useState<PodcastEpisode[]>([]);
@@ -52,6 +109,9 @@ export function App() {
   const [keyVerifyStatus, setKeyVerifyStatus] = useState<{ ok: boolean; text: string } | null>(
     null
   );
+  const [isSiteEditorOpen, setIsSiteEditorOpen] = useState<boolean>(false);
+  const [editingSiteId, setEditingSiteId] = useState<string | null>(null);
+  const [siteDraft, setSiteDraft] = useState<Omit<CustomSiteConfig, 'id'>>(EMPTY_SITE_DRAFT);
 
   const activeTurnRef = useRef<HTMLDivElement | null>(null);
 
@@ -400,13 +460,129 @@ export function App() {
   const handleStartGeminiKeySetup = async () => {
     setErrorBanner('');
     setKeyVerifyStatus(null);
+    try {
+      const res = await chrome.runtime.sendMessage({
+        type: 'START_GEMINI_KEY_SETUP',
+      } satisfies RuntimeRequest);
+      if (res?.ok) {
+        showToast('Google AI Studio を開きました。右下のガイドから1クリックで設定できます');
+        return;
+      }
+    } catch {
+      // Fallback directly below if Service Worker is reloading
+    }
+
+    try {
+      await chrome.tabs.create({
+        url: 'https://aistudio.google.com/apikey',
+        active: true,
+      });
+      showToast('Google AI Studio を開きました。キーをコピー後「📋 貼付＆テスト」を押してください');
+    } catch (err) {
+      setErrorBanner(
+        `Google AI Studio を開けませんでした: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  };
+
+  const handleOpenAddCustomSite = () => {
+    setEditingSiteId(null);
+    setSiteDraft({ ...EMPTY_SITE_DRAFT });
+    setIsSiteEditorOpen(true);
+  };
+
+  const handlePrefillCustomSiteFromActiveTab = async () => {
+    try {
+      const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!activeTab?.url || !activeTab.url.startsWith('http')) {
+        setErrorBanner('現在のタブは追加できないURLです（https:// ページを開いてお試しください）');
+        return;
+      }
+      const isChangelog = /changelog|release-notes|releases/i.test(activeTab.url);
+      setEditingSiteId(null);
+      setSiteDraft({
+        ...EMPTY_SITE_DRAFT,
+        name: (activeTab.title || new URL(activeTab.url).hostname).slice(0, 42),
+        url: activeTab.url,
+        extractionStrategy: isChangelog ? 'changelog' : 'auto',
+      });
+      setIsSiteEditorOpen(true);
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleEditCustomSite = (site: CustomSiteConfig) => {
+    setEditingSiteId(site.id);
+    setSiteDraft({
+      name: site.name,
+      url: site.url,
+      enabled: site.enabled,
+      passiveEnabled: site.passiveEnabled,
+      extractionStrategy: site.extractionStrategy,
+      cssSelector: site.cssSelector || '',
+      scrollSteps: site.scrollSteps ?? 0,
+      notes: site.notes || '',
+    });
+    setIsSiteEditorOpen(true);
+  };
+
+  const handleSaveCustomSite = async () => {
+    const cleanUrl = siteDraft.url.trim();
+    if (!/^https?:\/\//i.test(cleanUrl)) {
+      setErrorBanner('URL は https:// または http:// から始まる形式で入力してください。');
+      return;
+    }
+    const cleanName = siteDraft.name.trim() || new URL(cleanUrl).hostname;
+    const list = settings.customSites || [];
+    const nextSite: CustomSiteConfig = {
+      id: editingSiteId || `site-${Date.now()}`,
+      name: cleanName,
+      url: cleanUrl,
+      enabled: siteDraft.enabled,
+      passiveEnabled: siteDraft.passiveEnabled,
+      extractionStrategy: siteDraft.extractionStrategy,
+      cssSelector: siteDraft.cssSelector?.trim() || undefined,
+      scrollSteps: Math.max(0, Math.min(3, Number(siteDraft.scrollSteps) || 0)),
+      notes: siteDraft.notes?.trim() || undefined,
+    };
+
+    const nextList = editingSiteId
+      ? list.map((s) => (s.id === editingSiteId ? nextSite : s))
+      : [...list, nextSite];
+
+    await handlePatchSettings({ customSites: nextList });
+    setIsSiteEditorOpen(false);
+    setEditingSiteId(null);
+    setSiteDraft({ ...EMPTY_SITE_DRAFT });
+    showToast(editingSiteId ? `「${cleanName}」を更新しました` : `「${cleanName}」を追加しました`);
+  };
+
+  const handleToggleCustomSite = async (siteId: string, enabled: boolean) => {
+    const nextList = (settings.customSites || []).map((s) =>
+      s.id === siteId ? { ...s, enabled } : s
+    );
+    await handlePatchSettings({ customSites: nextList });
+  };
+
+  const handleDeleteCustomSite = async (siteId: string) => {
+    const nextList = (settings.customSites || []).filter((s) => s.id !== siteId);
+    await handlePatchSettings({ customSites: nextList });
+    showToast('カスタムサイトを削除しました');
+  };
+
+  const handlePatrolCustomSite = async (siteId: string, generateAfter: boolean) => {
+    setErrorBanner('');
+    if (generateAfter) setTab('player');
     const res = await chrome.runtime.sendMessage({
-      type: 'START_GEMINI_KEY_SETUP',
+      type: 'PATROL_CUSTOM_SITE',
+      siteId,
+      generateAfter,
     } satisfies RuntimeRequest);
     if (!res?.ok) {
-      setErrorBanner(res?.error || 'Google AI Studio を開けませんでした');
+      setErrorBanner(res?.error || 'カスタムサイトの巡回を開始できませんでした');
     } else {
-      showToast('Google AI Studio を開きました。右下のガイドから1クリックで設定できます');
+      setIsJobRunning(true);
     }
   };
 
@@ -713,7 +889,7 @@ export function App() {
                     >
                       {episodes.map((ep) => (
                         <option key={ep.id} value={ep.id}>
-                          {ep.title}
+                          {formatEpisodeOptionLabel(ep)}
                         </option>
                       ))}
                     </select>
@@ -736,6 +912,20 @@ export function App() {
                     >
                       🗑
                     </button>
+                  </div>
+
+                  <div className="episode-meta-card">
+                    <div className="episode-meta-time">
+                      <span>{formatEpisodeTimestamp(displayedEpisode.createdAt)}</span>
+                      <span>
+                        {displayedEpisode.sourceCount}件 · {displayedEpisode.chapters.length}
+                        チャプター
+                      </span>
+                    </div>
+                    <div className="episode-meta-title">{displayedEpisode.title}</div>
+                    <div className="episode-meta-subtitle">
+                      {deriveEpisodeSubtitle(displayedEpisode)}
+                    </div>
                   </div>
 
                   {displayedChapter ? (
@@ -1292,12 +1482,23 @@ export function App() {
             </div>
 
             <div className="settings-group">
-              <h2 className="settings-group-title">巡回・受動ストック対象サイト</h2>
+              <h2 className="settings-group-title">巡回・受動ストック対象サイト（標準）</h2>
               {(['x', 'note', 'zenn', 'yahoo_news', 'google_news'] as SourceId[]).map((srcId) => (
                 <div key={srcId} className="toggle-row">
-                  <div>
-                    <div>{SOURCE_META[srcId].label}</div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div className="site-name-row">
+                      <span>{SOURCE_META[srcId].label}</span>
+                      <span className="method-badge">{SOURCE_META[srcId].extractionMethod}</span>
+                    </div>
                     <p className="field-hint">{SOURCE_META[srcId].description}</p>
+                    <details className="extract-details">
+                      <summary>抽出の仕組みを見る</summary>
+                      <p className="field-hint">
+                        <strong>対象URL:</strong> {SOURCE_META[srcId].startUrl}
+                        <br />
+                        <strong>解析方法:</strong> {SOURCE_META[srcId].extractionDetail}
+                      </p>
+                    </details>
                   </div>
                   <input
                     id={`toggle-source-${srcId}`}
@@ -1319,7 +1520,7 @@ export function App() {
                 <div>
                   <div>ブラウジング中の自動受動ストック</div>
                   <p className="field-hint">
-                    普段Xや記事をスクロールしている間に未読キューへ自動蓄積
+                    普段X・記事・カスタムサイトをスクロールしている間に未読キューへ自動蓄積
                   </p>
                 </div>
                 <input
@@ -1346,6 +1547,276 @@ export function App() {
                   }
                 />
               </div>
+            </div>
+
+            <div className="settings-group">
+              <div className="section-toolbar" style={{ marginBottom: '8px' }}>
+                <h2 className="settings-group-title" style={{ margin: 0 }}>
+                  カスタム対象サイト ({(settings.customSites || []).length})
+                </h2>
+                <div style={{ display: 'flex', gap: '6px' }}>
+                  <button
+                    id="btn-add-current-tab-site"
+                    type="button"
+                    className="btn-secondary"
+                    style={{ padding: '4px 8px', fontSize: '11.5px' }}
+                    onClick={handlePrefillCustomSiteFromActiveTab}
+                  >
+                    ＋今のタブ
+                  </button>
+                  <button
+                    id="btn-add-custom-site"
+                    type="button"
+                    className="btn-primary"
+                    style={{ padding: '4px 9px', fontSize: '11.5px' }}
+                    onClick={handleOpenAddCustomSite}
+                  >
+                    ＋新規追加
+                  </button>
+                </div>
+              </div>
+
+              {isSiteEditorOpen && (
+                <div className="custom-site-editor">
+                  <div className="field-row">
+                    <label className="field-label" htmlFor="input-custom-site-name">
+                      サイト名
+                    </label>
+                    <input
+                      id="input-custom-site-name"
+                      type="text"
+                      className="field-input"
+                      placeholder="例：Antigravity Changelog / Hacker News"
+                      value={siteDraft.name}
+                      onChange={(e) => setSiteDraft({ ...siteDraft, name: e.target.value })}
+                    />
+                  </div>
+                  <div className="field-row">
+                    <label className="field-label" htmlFor="input-custom-site-url">
+                      巡回URL（RSSの場合はフィードURL）
+                    </label>
+                    <input
+                      id="input-custom-site-url"
+                      type="url"
+                      className="field-input"
+                      placeholder="https://antigravity.google/docs/changelog"
+                      value={siteDraft.url}
+                      onChange={(e) => setSiteDraft({ ...siteDraft, url: e.target.value })}
+                    />
+                  </div>
+                  <div className="field-row">
+                    <label className="field-label" htmlFor="select-custom-strategy">
+                      テキスト抽出方式
+                    </label>
+                    <select
+                      id="select-custom-strategy"
+                      className="field-select"
+                      value={siteDraft.extractionStrategy}
+                      onChange={(e) =>
+                        setSiteDraft({
+                          ...siteDraft,
+                          extractionStrategy: e.target.value as ExtractionStrategy,
+                        })
+                      }
+                    >
+                      {(Object.keys(EXTRACTION_STRATEGY_META) as ExtractionStrategy[]).map(
+                        (key) => (
+                          <option key={key} value={key}>
+                            {EXTRACTION_STRATEGY_META[key].label}
+                          </option>
+                        )
+                      )}
+                    </select>
+                    <p className="field-hint">
+                      {EXTRACTION_STRATEGY_META[siteDraft.extractionStrategy].description}
+                    </p>
+                  </div>
+                  {siteDraft.extractionStrategy === 'css_selector' && (
+                    <div className="field-row">
+                      <label className="field-label" htmlFor="input-custom-css">
+                        抽出対象 CSS セレクタ
+                      </label>
+                      <input
+                        id="input-custom-css"
+                        type="text"
+                        className="field-input"
+                        placeholder="例: article, .post-item, .release-entry"
+                        value={siteDraft.cssSelector || ''}
+                        onChange={(e) =>
+                          setSiteDraft({ ...siteDraft, cssSelector: e.target.value })
+                        }
+                      />
+                    </div>
+                  )}
+                  <div className="field-row inline-two-col">
+                    <div>
+                      <label className="field-label" htmlFor="select-custom-scroll">
+                        自動スクロール回数
+                      </label>
+                      <select
+                        id="select-custom-scroll"
+                        className="field-select"
+                        value={siteDraft.scrollSteps}
+                        onChange={(e) =>
+                          setSiteDraft({ ...siteDraft, scrollSteps: Number(e.target.value) })
+                        }
+                      >
+                        <option value={0}>0回（初期表示のみ）</option>
+                        <option value={1}>1回</option>
+                        <option value={2}>2回（SNS等）</option>
+                        <option value={3}>3回（深め）</option>
+                      </select>
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', paddingTop: '18px' }}>
+                      <label className="inline-check">
+                        <input
+                          type="checkbox"
+                          checked={siteDraft.enabled}
+                          onChange={(e) =>
+                            setSiteDraft({ ...siteDraft, enabled: e.target.checked })
+                          }
+                        />
+                        <span>一括巡回に含める</span>
+                      </label>
+                      <label className="inline-check">
+                        <input
+                          type="checkbox"
+                          checked={siteDraft.passiveEnabled}
+                          onChange={(e) =>
+                            setSiteDraft({ ...siteDraft, passiveEnabled: e.target.checked })
+                          }
+                        />
+                        <span>閲覧時に受動ストック</span>
+                      </label>
+                    </div>
+                  </div>
+                  <div className="field-row">
+                    <label className="field-label" htmlFor="input-custom-notes">
+                      メモ（任意）
+                    </label>
+                    <input
+                      id="input-custom-notes"
+                      type="text"
+                      className="field-input"
+                      placeholder="例：毎週チェックするリリースノート"
+                      value={siteDraft.notes || ''}
+                      onChange={(e) => setSiteDraft({ ...siteDraft, notes: e.target.value })}
+                    />
+                  </div>
+                  <div style={{ display: 'flex', gap: '6px', justifyContent: 'flex-end' }}>
+                    <button
+                      type="button"
+                      className="btn-ghost"
+                      onClick={() => {
+                        setIsSiteEditorOpen(false);
+                        setEditingSiteId(null);
+                      }}
+                    >
+                      キャンセル
+                    </button>
+                    <button
+                      id="btn-save-custom-site"
+                      type="button"
+                      className="btn-primary"
+                      onClick={handleSaveCustomSite}
+                    >
+                      {editingSiteId ? '変更を保存' : 'サイトを保存'}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {(settings.customSites || []).length === 0 ? (
+                <p className="field-hint">
+                  まだカスタムサイトがありません。「＋今のタブ」または「＋新規追加」から任意のニュース・ブログ・Changelog・RSSを追加できます。
+                </p>
+              ) : (
+                <div className="custom-site-list">
+                  {(settings.customSites || []).map((site) => (
+                    <div key={site.id} className="custom-site-card">
+                      <div className="custom-site-head">
+                        <label className="inline-check" style={{ fontWeight: 600 }}>
+                          <input
+                            type="checkbox"
+                            checked={site.enabled}
+                            onChange={(e) =>
+                              void handleToggleCustomSite(site.id, e.target.checked)
+                            }
+                          />
+                          <span>{site.name}</span>
+                        </label>
+                        <span className="method-badge">
+                          {EXTRACTION_STRATEGY_META[site.extractionStrategy]?.label ||
+                            site.extractionStrategy}
+                        </span>
+                      </div>
+                      <div className="custom-site-url" title={site.url}>
+                        {site.url}
+                      </div>
+                      {site.cssSelector && (
+                        <div className="field-hint">セレクタ: {site.cssSelector}</div>
+                      )}
+                      {site.notes && <div className="field-hint">{site.notes}</div>}
+                      <div className="custom-site-actions">
+                        <button
+                          type="button"
+                          className="share-btn"
+                          disabled={isJobRunning}
+                          onClick={() => void handlePatrolCustomSite(site.id, false)}
+                        >
+                          キュー取得
+                        </button>
+                        <button
+                          type="button"
+                          className="share-btn"
+                          disabled={isJobRunning}
+                          onClick={() => void handlePatrolCustomSite(site.id, true)}
+                        >
+                          すぐ番組化
+                        </button>
+                        <button
+                          type="button"
+                          className="share-btn"
+                          onClick={() => handleEditCustomSite(site)}
+                        >
+                          編集
+                        </button>
+                        <button
+                          type="button"
+                          className="share-btn"
+                          onClick={() => void handleDeleteCustomSite(site.id)}
+                        >
+                          削除
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <details className="pipeline-guide">
+                <summary>情報収集・テキスト抽出の仕組み（4ステップ）</summary>
+                <ol className="pipeline-steps">
+                  <li>
+                    <strong>セッション読み取り：</strong>
+                    Chromeのログイン済みセッションを使い、オレンジ色の専用タブグループ「agentCast
+                    巡回中」で対象URLを開きます（RSS方式はタブを開かず直接XML取得）。ログイン画面やCAPTCHAを検知すると即座に停止します。
+                  </li>
+                  <li>
+                    <strong>DOM解析＆ノイズ除去：</strong>
+                    サイト専用パーサー（Xの広告除外・Zennのコード要点化・Yahooの元記事追跡・Changelogのアクティブパネル抽出）、指定CSSセレクタ、または Mozilla
+                    Readability でナビ・フッター・広告を除いた本文テキストを構造化します。
+                  </li>
+                  <li>
+                    <strong>重複排除＆ローカル蓄積：</strong>
+                    URL正規化とハッシュIDで重複を除外し、ブラウザ内の IndexedDB（未読キュー）へ保存します。外部サーバーへ収集データを送信することはありません。
+                  </li>
+                  <li>
+                    <strong>AI番組構成＆音声化：</strong>
+                    未読キューの本文を整理して2人掛け合いのJSON台本（固有タイトル・要約サブタイトル・チャプター別参照リンク付き）を生成し、TTSで音声化します。
+                  </li>
+                </ol>
+              </details>
             </div>
 
             <div className="settings-group">

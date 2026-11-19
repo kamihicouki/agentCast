@@ -206,7 +206,7 @@ function generateManifest() {
   fs.writeFileSync(path.join(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
 }
 
-function writeBuildMeta() {
+function writeBuildMeta(buildId) {
   const hash = crypto.createHash('sha1');
   for (const file of ['manifest.json', 'background.js', 'content.js', 'sidepanel.html', 'offscreen.html']) {
     const p = path.join(outDir, file);
@@ -224,7 +224,7 @@ function writeBuildMeta() {
   const contentHash = hash.digest('hex').slice(0, 12);
   const builtAt = new Date().toISOString();
   const buildMeta = {
-    buildId: `${pkg.version}-${contentHash}-${Date.now()}`,
+    buildId,
     contentHash,
     builtAt,
     target: buildTarget,
@@ -242,13 +242,15 @@ function writeIcons() {
   }
 }
 
-const sharedDefine = {
-  __AGENTCAST_TARGET__: JSON.stringify(buildTarget),
-  __DEV_AUTO_RELOAD__: JSON.stringify(isPersonalMain),
-};
-
 async function buildOnce() {
   const t0 = Date.now();
+  const buildId = `${pkg.version}-${t0}`;
+  const sharedDefine = {
+    __AGENTCAST_TARGET__: JSON.stringify(buildTarget),
+    __DEV_AUTO_RELOAD__: JSON.stringify(isPersonalMain),
+    __AGENTCAST_BUILD_ID__: JSON.stringify(buildId),
+  };
+
   fs.rmSync(outDir, { recursive: true, force: true });
   fs.mkdirSync(outDir, { recursive: true });
 
@@ -329,7 +331,7 @@ async function buildOnce() {
 
   writeIcons();
   generateManifest();
-  const meta = writeBuildMeta();
+  const meta = writeBuildMeta(buildId);
   console.log(
     `[agentCast] Built (${buildTarget}) -> dist/chrome-mv3 in ${Date.now() - t0}ms [buildId=${meta.buildId}]`
   );
