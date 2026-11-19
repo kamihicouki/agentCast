@@ -34,6 +34,10 @@ import {
   getDevBuildStatus,
   startDevAutoReloader,
 } from '../../providers/personal-only/dev-reloader';
+import {
+  injectAiStudioKeyHelper,
+  verifyGeminiApiKey,
+} from '../../providers/personal-only/aistudio-key-helper';
 
 const ALARM_MORNING_CAST = 'agentcast_scheduled_generation';
 const PATROL_GROUP_TITLE = 'agentCast 巡回中';
@@ -892,7 +896,94 @@ chrome.runtime.onMessage.addListener((message: RuntimeRequest, _sender, sendResp
       })();
       return true;
 
+    case 'START_GEMINI_KEY_SETUP':
+      void startGeminiKeySetup()
+        .then((tabId) => sendResponse({ ok: true, tabId }))
+        .catch((err: unknown) =>
+          sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) })
+        );
+      return true;
+
+    case 'GEMINI_KEY_CAPTURED':
+      void (async () => {
+        const key = (message.apiKey || '').trim();
+        const verify = await verifyGeminiApiKey(key);
+        if (!verify.valid) {
+          sendResponse({ ok: false, error: verify.message });
+          return;
+        }
+        await saveSettings({
+          geminiApiKey: key,
+          aiMode: 'gemini_api',
+          ttsMode: 'gemini_tts',
+        });
+        broadcastEvent({
+          type: 'GEMINI_KEY_SETUP_DONE',
+          valid: true,
+          message: verify.message,
+        });
+        sendResponse({ ok: true, message: verify.message });
+      })();
+      return true;
+
+    case 'VERIFY_GEMINI_KEY':
+      void (async () => {
+        const key = (message.apiKey ?? (await getSettings()).geminiApiKey).trim();
+        const result = await verifyGeminiApiKey(key);
+        sendResponse({ ok: result.valid, message: result.message });
+      })();
+      return true;
+
     default:
       return false;
   }
 });
+
+async function startGeminiKeySetup(): Promise<number | undefined> {
+  const tab = await chrome.tabs.create({
+    url: 'https://aistudio.google.com/apikey',
+    active: true,
+  });
+  const tabId = tab.id;
+  if (!tabId) return undefined;
+
+  const tryInject = async () => {
+    try {
+      const current = await chrome.tabs.get(tabId);
+      if (!current.url || !current.url.startsWith('https://aistudio.google.com/')) {
+        return;
+      }
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        func: injectAiStudioKeyHelper,
+      });
+    } catch {
+      // Ignore transient navigation or permission errors while Google login redirects
+    }
+  };
+
+  // Re-inject automatically if user completes Google sign-in and redirects back to AI Studio
+  const onUpdated = (updatedTabId: number, changeInfo: chrome.tabs.TabChangeInfo) => {
+    if (updatedTabId === tabId && changeInfo.status === 'complete') {
+      setTimeout(() => void tryInject(), 900);
+    }
+  };
+
+  const cleanup = () => {
+    chrome.tabs.onUpdated.removeListener(onUpdated);
+    chrome.tabs.onRemoved.removeListener(onRemoved);
+  };
+
+  const onRemoved = (removedTabId: number) => {
+    if (removedTabId === tabId) cleanup();
+  };
+
+  chrome.tabs.onUpdated.addListener(onUpdated);
+  chrome.tabs.onRemoved.addListener(onRemoved);
+  setTimeout(cleanup, 5 * 60 * 1000);
+
+  await waitForTabReady(tabId, 16000);
+  await sleep(1000);
+  await tryInject();
+  return tabId;
+}

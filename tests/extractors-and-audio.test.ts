@@ -303,4 +303,16 @@ describe('Audio WAV Wrapping & Script JSON Parsing', () => {
     expect(md).toContain('### 参照リンク');
     expect(md).toContain('https://zenn.dev/');
   });
+
+  it('validates Gemini API key format locally before making network requests', async () => {
+    const { verifyGeminiApiKey } = await import(
+      '../src/providers/personal-only/aistudio-key-helper'
+    );
+    const emptyRes = await verifyGeminiApiKey('');
+    expect(emptyRes.valid).toBe(false);
+    expect(emptyRes.message).toContain('AIza');
+
+    const badRes = await verifyGeminiApiKey('sk-invalid-key-12345');
+    expect(badRes.valid).toBe(false);
+  });
 });

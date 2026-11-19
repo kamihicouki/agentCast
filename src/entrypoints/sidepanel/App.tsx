@@ -47,6 +47,11 @@ export function App() {
   const [errorBanner, setErrorBanner] = useState<string>('');
   const [currentBuild, setCurrentBuild] = useState<BuildMeta | null>(null);
   const [pendingBuild, setPendingBuild] = useState<BuildMeta | null>(null);
+  const [setupDismissed, setSetupDismissed] = useState<boolean>(false);
+  const [isVerifyingKey, setIsVerifyingKey] = useState<boolean>(false);
+  const [keyVerifyStatus, setKeyVerifyStatus] = useState<{ ok: boolean; text: string } | null>(
+    null
+  );
 
   const activeTurnRef = useRef<HTMLDivElement | null>(null);
 
@@ -54,7 +59,7 @@ export function App() {
     setToastMessage(msg);
     window.setTimeout(() => {
       setToastMessage((prev) => (prev === msg ? '' : prev));
-    }, 2800);
+    }, 3400);
   }, []);
 
   const refreshTabGroups = useCallback(async () => {
@@ -162,12 +167,21 @@ export function App() {
         void refreshTabGroups();
       } else if (msg?.type === 'DEV_BUILD_UPDATE_AVAILABLE' && msg.pendingBuild) {
         setPendingBuild(msg.pendingBuild as BuildMeta);
+      } else if (msg?.type === 'GEMINI_KEY_SETUP_DONE') {
+        void getSettings().then(setSettings);
+        setErrorBanner('');
+        const text =
+          typeof msg.message === 'string'
+            ? msg.message
+            : 'Gemini API キーを設定しました！';
+        setKeyVerifyStatus({ ok: true, text });
+        showToast(text);
       }
     };
 
     chrome.runtime.onMessage.addListener(onRuntimeMessage);
     return () => chrome.runtime.onMessage.removeListener(onRuntimeMessage);
-  }, [refreshData, refreshTabGroups]);
+  }, [refreshData, refreshTabGroups, showToast]);
 
   useEffect(() => {
     if (playback.isPlaying && activeTurnRef.current) {
@@ -383,6 +397,77 @@ export function App() {
     } satisfies RuntimeRequest);
   };
 
+  const handleStartGeminiKeySetup = async () => {
+    setErrorBanner('');
+    setKeyVerifyStatus(null);
+    const res = await chrome.runtime.sendMessage({
+      type: 'START_GEMINI_KEY_SETUP',
+    } satisfies RuntimeRequest);
+    if (!res?.ok) {
+      setErrorBanner(res?.error || 'Google AI Studio を開けませんでした');
+    } else {
+      showToast('Google AI Studio を開きました。右下のガイドから1クリックで設定できます');
+    }
+  };
+
+  const handlePasteKeyFromClipboard = async () => {
+    setErrorBanner('');
+    setIsVerifyingKey(true);
+    try {
+      const text = await navigator.clipboard.readText();
+      const match = /\b(AIza[0-9A-Za-z_-]{35})\b/.exec(text || '');
+      if (!match?.[1]) {
+        const msg =
+          'クリップボードに Gemini API キー（AIza...）が見つかりません。AI Studio でキーをコピーしてから押してください。';
+        setKeyVerifyStatus({ ok: false, text: msg });
+        setErrorBanner(msg);
+        return;
+      }
+      const res = await chrome.runtime.sendMessage({
+        type: 'GEMINI_KEY_CAPTURED',
+        apiKey: match[1],
+      } satisfies RuntimeRequest);
+      if (res?.ok) {
+        const saved = await getSettings();
+        setSettings(saved);
+        const msg = res.message || '接続テスト成功！キーを保存しました。';
+        setKeyVerifyStatus({ ok: true, text: msg });
+        showToast(msg);
+      } else {
+        const msg = res?.error || 'APIキーの検証に失敗しました';
+        setKeyVerifyStatus({ ok: false, text: msg });
+        setErrorBanner(msg);
+      }
+    } catch (err) {
+      setErrorBanner(
+        `クリップボードの読み取りに失敗しました: ${err instanceof Error ? err.message : String(err)}`
+      );
+    } finally {
+      setIsVerifyingKey(false);
+    }
+  };
+
+  const handleVerifyGeminiKey = async () => {
+    setErrorBanner('');
+    setIsVerifyingKey(true);
+    try {
+      const res = await chrome.runtime.sendMessage({
+        type: 'VERIFY_GEMINI_KEY',
+        apiKey: settings.geminiApiKey,
+      } satisfies RuntimeRequest);
+      const text = res?.message || (res?.ok ? '接続テスト成功！' : '接続テストに失敗しました');
+      setKeyVerifyStatus({ ok: Boolean(res?.ok), text });
+      if (res?.ok) showToast(text);
+    } catch (err) {
+      setKeyVerifyStatus({
+        ok: false,
+        text: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setIsVerifyingKey(false);
+    }
+  };
+
   const handleRemoveQueueItem = async (id: string) => {
     await db.feedItems.delete(id);
     setQueue((prev) => prev.filter((item) => item.id !== id));
@@ -558,6 +643,63 @@ export function App() {
       <main className="studio-main">
         {tab === 'player' && (
           <>
+            {!settings.geminiApiKey.trim() &&
+              settings.aiMode === 'gemini_api' &&
+              !setupDismissed && (
+                <section className="onboarding-card" aria-label="初回APIキーかんたん設定">
+                  <div className="onboarding-header">
+                    <h2 className="onboarding-title">Google AI Pro / Ultra 初回セットアップ</h2>
+                    <button
+                      type="button"
+                      className="btn-ghost"
+                      onClick={() => setSetupDismissed(true)}
+                      aria-label="セットアップ案内を閉じる"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  <p className="onboarding-desc">
+                    AI Studio
+                    を開いてキーを作成・表示するだけで、agentCast
+                    が自動検出して保存＆接続テストまで半自動で完了します。
+                  </p>
+                  <div className="onboarding-actions">
+                    <button
+                      id="btn-onboarding-start-aistudio"
+                      type="button"
+                      className="btn-primary"
+                      onClick={handleStartGeminiKeySetup}
+                    >
+                      AI Studio を開いてキーを半自動設定
+                    </button>
+                    <div className="onboarding-sub-row">
+                      <button
+                        id="btn-onboarding-paste-key"
+                        type="button"
+                        className="btn-secondary"
+                        disabled={isVerifyingKey}
+                        onClick={handlePasteKeyFromClipboard}
+                      >
+                        {isVerifyingKey ? '接続テスト中...' : '📋 クリップボードから貼付＆テスト'}
+                      </button>
+                      <button
+                        id="btn-onboarding-use-web"
+                        type="button"
+                        className="btn-ghost"
+                        onClick={() =>
+                          void handlePatchSettings({
+                            aiMode: 'web_gemini',
+                            ttsMode: 'macos_speech',
+                          })
+                        }
+                        title="APIキーを使わずにログイン済み Gemini Web セッションで生成"
+                      >
+                        キーなしWeb連携
+                      </button>
+                    </div>
+                  </div>
+                </section>
+              )}
             {displayedEpisode ? (
               <>
                 <section className="player-deck" aria-label="ポッドキャスト再生デッキ">
@@ -974,11 +1116,59 @@ export function App() {
                     className="field-input"
                     placeholder="AIzaSy..."
                     value={settings.geminiApiKey}
-                    onChange={(e) => void handlePatchSettings({ geminiApiKey: e.target.value })}
+                    onChange={(e) => {
+                      setKeyVerifyStatus(null);
+                      void handlePatchSettings({ geminiApiKey: e.target.value });
+                    }}
                   />
+                  <div className="key-tools-row">
+                    <button
+                      id="btn-settings-aistudio-setup"
+                      type="button"
+                      className="btn-primary"
+                      onClick={handleStartGeminiKeySetup}
+                    >
+                      AI Studio で半自動取得
+                    </button>
+                    <button
+                      id="btn-settings-paste-key"
+                      type="button"
+                      className="btn-secondary"
+                      disabled={isVerifyingKey}
+                      onClick={handlePasteKeyFromClipboard}
+                    >
+                      📋 貼付＆テスト
+                    </button>
+                    <button
+                      id="btn-settings-verify-key"
+                      type="button"
+                      className="btn-secondary"
+                      disabled={isVerifyingKey || !settings.geminiApiKey.trim()}
+                      onClick={handleVerifyGeminiKey}
+                    >
+                      {isVerifyingKey ? '確認中...' : '接続テスト'}
+                    </button>
+                  </div>
+                  {keyVerifyStatus && (
+                    <div
+                      className={`key-status ${keyVerifyStatus.ok ? 'is-ok' : 'is-err'}`}
+                      role="status"
+                    >
+                      {keyVerifyStatus.text}
+                    </div>
+                  )}
                   <p className="field-hint">
-                    ローカル（chrome.storage.local）にのみ保存されます。未入力時は音声が自動的にmacOS
-                    Web Speechへフォールバックします。
+                    ローカル（chrome.storage.local）にのみ保存されます。Google AI Pro/Ultra
+                    の月次クレジットは{' '}
+                    <a
+                      href="https://developers.google.com/profile"
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      Google Developer Program
+                    </a>{' '}
+                    から有効化できます。未入力時は音声が自動的に macOS Web Speech
+                    へフォールバックします。
                   </p>
                 </div>
               )}

@@ -48,7 +48,10 @@ export type RuntimeRequest =
   | { type: 'OFFSCREEN_STATE_PUSH'; state: PlaybackState }
   | { type: 'TRIGGER_DEV_RELOAD_NOW' }
   | { type: 'GET_DEV_BUILD_STATUS' }
-  | { type: 'UPDATE_SETTINGS'; settings: Partial<ExtensionSettings> };
+  | { type: 'UPDATE_SETTINGS'; settings: Partial<ExtensionSettings> }
+  | { type: 'START_GEMINI_KEY_SETUP' }
+  | { type: 'GEMINI_KEY_CAPTURED'; apiKey: string; closeSetupTab?: boolean }
+  | { type: 'VERIFY_GEMINI_KEY'; apiKey?: string };
 
 export interface DevBuildStatus {
   currentBuild: BuildMeta | null;
