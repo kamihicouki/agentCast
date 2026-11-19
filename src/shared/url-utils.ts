@@ -22,7 +22,11 @@ export function canonicalizeUrl(rawUrl: string, baseUrl?: string): string {
     if (parsed.hostname === 'twitter.com') {
       parsed.hostname = 'x.com';
     }
-    parsed.hash = '';
+    // Keep semantic release/version hashes (e.g. #rel-hub-2.33.0, #v2.33.0) so each changelog entry has a unique canonical URL
+    const keepHash = /^#(rel-|v?\d+\.\d+)/i.test(parsed.hash);
+    if (!keepHash) {
+      parsed.hash = '';
+    }
     for (const key of [...parsed.searchParams.keys()]) {
       if (TRACKING_PARAMS.has(key.toLowerCase())) {
         parsed.searchParams.delete(key);

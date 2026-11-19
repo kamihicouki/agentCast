@@ -111,6 +111,7 @@ export interface PodcastEpisode {
   title: string;
   subtitle: string;
   createdAt: string;
+  updatedAt?: string;
   status: EpisodeStatus;
   statusDetail?: string;
   providerLabel: string;
@@ -119,6 +120,13 @@ export interface PodcastEpisode {
   totalDurationSec: number;
   sourceCount: number;
   errorMessage?: string;
+}
+
+export interface TabGroupSummary {
+  id: number;
+  title: string;
+  color: string;
+  tabCount: number;
 }
 
 export type AIMode = 'gemini_api' | 'openai_api' | 'web_chatgpt' | 'web_gemini';

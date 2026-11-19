@@ -9,9 +9,15 @@ import {
   extractZenn,
 } from '../src/extractors';
 import { parseZennRssXml } from '../src/extractors/zenn';
-import { ensurePlayableAudioBlob, isRiffWav, wrapPcm16ToWav } from '../src/shared/wav-utils';
+import {
+  ensurePlayableAudioBlob,
+  isRiffWav,
+  mergeAudioBlobs,
+  wrapPcm16ToWav,
+} from '../src/shared/wav-utils';
 import { DEFAULT_SETTINGS } from '../src/shared/types';
-import { parseGeneratedScriptJson } from '../src/providers/prompt-builder';
+import { createDemoEpisode, parseGeneratedScriptJson } from '../src/providers/prompt-builder';
+import { formatEpisodeAsMarkdown } from '../src/shared/export-utils';
 
 function docFromHtml(html: string, url: string): Document {
   return new JSDOM(html, { url }).window.document;
@@ -226,5 +232,75 @@ describe('Audio WAV Wrapping & Script JSON Parsing', () => {
     expect(parsed.chapters).toHaveLength(1);
     expect(parsed.chapters[0].sourceItems[0]?.url).toBe('https://zenn.dev/example');
     expect(parsed.chapters[0].turns[0]?.speakerName).toBe(DEFAULT_SETTINGS.hostAName);
+  });
+
+  it('extracts structured releases from active tabpanel on antigravity.google/docs/changelog', () => {
+    const doc = docFromHtml(
+      `
+      <main>
+        <div id="panel-hub" class="rn-panel active">
+          <h2>Antigravity App</h2>
+          <article id="rel-models-gemini-4-neon" class="rn-row release-entry">
+            <h3>Gemini 4 Neon</h3>
+            <p>Gemini 4 Neon is now available on Google AI Ultra and Google AI Pro with four thinking levels.</p>
+          </article>
+          <article id="rel-hub-2.33.0" class="rn-row release-entry">
+            <h3>v2.33.0</h3>
+            <h3>Connect over SSH and GitHub pull request integration</h3>
+            <p>This release adds SSH host connections for running projects and agents on remote Linux machines.</p>
+            <details>
+              <summary>Improvements (16)</summary>
+              <ul>
+                <li>You can now connect the Antigravity App to a remote 64-bit Linux machine over SSH.</li>
+                <li>GitHub pull request links in chat now render as live status pills.</li>
+              </ul>
+            </details>
+          </article>
+        </div>
+        <div id="panel-cli" class="rn-panel">
+          <h2>Antigravity CLI</h2>
+          <article id="rel-cli-1.0.0" class="rn-row release-entry">
+            <h3>v1.0.0</h3>
+            <p>Inactive tab panel content that should not leak into active extraction.</p>
+          </article>
+        </div>
+      </main>
+    `,
+      'https://antigravity.google/docs/changelog'
+    );
+
+    const res = extractFromDocument(doc, 'https://antigravity.google/docs/changelog');
+    expect(res.blocked).toBe(false);
+    expect(res.candidates).toHaveLength(2);
+    expect(res.candidates[0].url).toBe(
+      'https://antigravity.google/docs/changelog#rel-models-gemini-4-neon'
+    );
+    expect(res.candidates[1].url).toBe('https://antigravity.google/docs/changelog#rel-hub-2.33.0');
+    expect(res.candidates[1].title).toContain('v2.33.0');
+    expect(res.candidates[1].content).toContain('Improvements (16)');
+    expect(res.candidates[1].content).toContain('remote 64-bit Linux machine over SSH');
+  });
+
+  it('merges multi-chapter WAV blobs with 0.6s silence pause and formats Markdown show notes', async () => {
+    // 0.5s of 24kHz 16-bit mono PCM = 24,000 bytes per chapter
+    const ch1 = ensurePlayableAudioBlob(new Uint8Array(24000), 'audio/L16;codec=pcm;rate=24000');
+    const ch2 = ensurePlayableAudioBlob(new Uint8Array(24000), 'audio/L16;codec=pcm;rate=24000');
+
+    const merged = await mergeAudioBlobs([
+      { blob: ch1.blob, mimeType: ch1.mimeType },
+      { blob: ch2.blob, mimeType: ch2.mimeType },
+    ]);
+
+    expect(merged.ext).toBe('wav');
+    // 44 header + 24000 + (24000 * 0.6 * 2 = 28800 gap) + 24000 = 76844 bytes
+    const bytes = new Uint8Array(await merged.blob.arrayBuffer());
+    expect(isRiffWav(bytes)).toBe(true);
+    expect(bytes.byteLength).toBe(44 + 24000 + 28800 + 24000);
+
+    const demo = createDemoEpisode(DEFAULT_SETTINGS);
+    const md = formatEpisodeAsMarkdown(demo);
+    expect(md).toContain(`# ${demo.title}`);
+    expect(md).toContain('### 参照リンク');
+    expect(md).toContain('https://zenn.dev/');
   });
 });

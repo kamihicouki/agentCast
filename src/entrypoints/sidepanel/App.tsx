@@ -10,8 +10,15 @@ import {
   type PlaybackState,
   type PodcastEpisode,
   type SourceId,
+  type TabGroupSummary,
 } from '../../shared/types';
 import type { DevBuildStatus, RuntimeRequest } from '../../shared/messages';
+import {
+  copyEpisodeMarkdown,
+  downloadEpisodeAudio,
+  downloadPortableHtmlPlayer,
+  shareEpisodeNative,
+} from '../../shared/export-utils';
 
 type ActiveTab = 'player' | 'queue' | 'settings';
 
@@ -30,14 +37,42 @@ export function App() {
   const [episodes, setEpisodes] = useState<PodcastEpisode[]>([]);
   const [selectedEpisodeId, setSelectedEpisodeId] = useState<string | null>(null);
   const [queue, setQueue] = useState<FeedItem[]>([]);
+  const [tabGroups, setTabGroups] = useState<TabGroupSummary[]>([]);
+  const [selectedGroupId, setSelectedGroupId] = useState<number | ''>('');
   const [settings, setSettings] = useState<ExtensionSettings>(DEFAULT_SETTINGS);
   const [playback, setPlayback] = useState<PlaybackState>(INITIAL_PLAYBACK_STATE);
+  const [isJobRunning, setIsJobRunning] = useState<boolean>(false);
   const [busyMessage, setBusyMessage] = useState<string>('');
+  const [toastMessage, setToastMessage] = useState<string>('');
   const [errorBanner, setErrorBanner] = useState<string>('');
   const [currentBuild, setCurrentBuild] = useState<BuildMeta | null>(null);
   const [pendingBuild, setPendingBuild] = useState<BuildMeta | null>(null);
 
   const activeTurnRef = useRef<HTMLDivElement | null>(null);
+
+  const showToast = useCallback((msg: string) => {
+    setToastMessage(msg);
+    window.setTimeout(() => {
+      setToastMessage((prev) => (prev === msg ? '' : prev));
+    }, 2800);
+  }, []);
+
+  const refreshTabGroups = useCallback(async () => {
+    try {
+      const res = (await chrome.runtime.sendMessage({
+        type: 'LIST_TAB_GROUPS',
+      } satisfies RuntimeRequest)) as { ok?: boolean; groups?: TabGroupSummary[] };
+      if (res?.ok && Array.isArray(res.groups)) {
+        setTabGroups(res.groups);
+        setSelectedGroupId((prev) => {
+          if (prev !== '' && res.groups!.some((g) => g.id === prev)) return prev;
+          return res.groups![0]?.id ?? '';
+        });
+      }
+    } catch {
+      // ignore if tabGroups unavailable
+    }
+  }, []);
 
   const refreshData = useCallback(async () => {
     const [eps, unread, savedSettings] = await Promise.all([
@@ -48,16 +83,31 @@ export function App() {
     setEpisodes(eps);
     setQueue(unread);
     setSettings(savedSettings);
-    setSelectedEpisodeId((prev) => prev || eps[0]?.id || null);
+    setSelectedEpisodeId((prev) => {
+      if (prev && eps.some((e) => e.id === prev)) return prev;
+      return eps[0]?.id || null;
+    });
   }, []);
 
   useEffect(() => {
     void refreshData();
+    void refreshTabGroups();
 
     chrome.runtime
       .sendMessage({ type: 'GET_PLAYBACK_STATE' } satisfies RuntimeRequest)
       .then((res) => {
         if (res?.state) setPlayback(res.state);
+      })
+      .catch(() => {});
+
+    chrome.runtime
+      .sendMessage({ type: 'GET_JOB_STATUS' } satisfies RuntimeRequest)
+      .then((res) => {
+        if (res?.ok) {
+          setIsJobRunning(Boolean(res.isJobRunning));
+          if (res.message) setBusyMessage(res.message);
+          if (res.lastError) setErrorBanner(res.lastError);
+        }
       })
       .catch(() => {});
 
@@ -84,14 +134,32 @@ export function App() {
           .toArray()
           .then((eps) => {
             setEpisodes(eps);
-            if (typeof msg.episodeId === 'string') {
+            if (typeof msg.episodeId === 'string' && eps.some((e) => e.id === msg.episodeId)) {
               setSelectedEpisodeId(msg.episodeId);
+            } else {
+              setSelectedEpisodeId((prev) =>
+                prev && eps.some((e) => e.id === prev) ? prev : eps[0]?.id || null
+              );
             }
           });
       } else if (msg?.type === 'QUEUE_UPDATED') {
         void getUnreadQueue(80).then(setQueue);
       } else if (msg?.type === 'PATROL_PROGRESS') {
         setBusyMessage(typeof msg.message === 'string' ? msg.message : '');
+        if (typeof msg.isJobRunning === 'boolean') {
+          setIsJobRunning(msg.isJobRunning);
+        }
+      } else if (msg?.type === 'JOB_ERROR' && typeof msg.message === 'string') {
+        setErrorBanner(msg.message);
+        setIsJobRunning(false);
+        setBusyMessage('');
+      } else if (msg?.type === 'JOB_WARNING' && typeof msg.message === 'string') {
+        setErrorBanner(msg.message);
+      } else if (msg?.type === 'JOB_FINISHED') {
+        setIsJobRunning(false);
+        setBusyMessage('');
+        void refreshData();
+        void refreshTabGroups();
       } else if (msg?.type === 'DEV_BUILD_UPDATE_AVAILABLE' && msg.pendingBuild) {
         setPendingBuild(msg.pendingBuild as BuildMeta);
       }
@@ -99,7 +167,7 @@ export function App() {
 
     chrome.runtime.onMessage.addListener(onRuntimeMessage);
     return () => chrome.runtime.onMessage.removeListener(onRuntimeMessage);
-  }, [refreshData]);
+  }, [refreshData, refreshTabGroups]);
 
   useEffect(() => {
     if (playback.isPlaying && activeTurnRef.current) {
@@ -118,9 +186,25 @@ export function App() {
   const displayedChapter =
     displayedEpisode?.chapters[displayedChapterIndex] || displayedEpisode?.chapters[0] || null;
 
+  const hasAudioExportable = Boolean(
+    displayedEpisode?.chapters.some((ch) => ch.hasAudioBlob)
+  );
+
+  const staleCount = useMemo(
+    () =>
+      episodes.filter(
+        (e) =>
+          e.status === 'error' ||
+          (!isJobRunning &&
+            (e.status === 'generating_script' ||
+              e.status === 'synthesizing_audio' ||
+              e.status === 'collecting'))
+      ).length,
+    [episodes, isJobRunning]
+  );
+
   const handleCaptureActiveTab = async () => {
     setErrorBanner('');
-    setBusyMessage('現在のタブから記事・ポストを読み取り中...');
     try {
       const res = await chrome.runtime.sendMessage({
         type: 'CAPTURE_ACTIVE_TAB',
@@ -130,54 +214,136 @@ export function App() {
       } else if (res.warning) {
         setErrorBanner(res.warning);
       } else {
-        setBusyMessage(`現在のタブから ${res.inserted} 件の新着をキューに追加しました`);
-        setTimeout(() => setBusyMessage(''), 2600);
+        showToast(`今のタブから ${res.inserted} 件の新着をキューに追加しました`);
       }
       await refreshData();
     } catch (err) {
       setErrorBanner(err instanceof Error ? err.message : String(err));
-    } finally {
-      setTimeout(() => setBusyMessage((m) => (m.includes('読み取り中') ? '' : m)), 300);
+    }
+  };
+
+  const handleCaptureAndGenerateActiveTab = async () => {
+    setErrorBanner('');
+    setTab('player');
+    const res = await chrome.runtime.sendMessage({
+      type: 'CAPTURE_AND_GENERATE_ACTIVE_TAB',
+    } satisfies RuntimeRequest);
+    if (!res?.ok) {
+      setErrorBanner(res?.error || '現在のタブの番組化を開始できませんでした');
+    } else {
+      setIsJobRunning(true);
     }
   };
 
   const handlePatrolAndGenerate = async () => {
     setErrorBanner('');
     setTab('player');
-    setBusyMessage('フォロー中サイトを巡回して番組を編成しています...');
-    try {
-      const res = await chrome.runtime.sendMessage({
-        type: 'PATROL_AND_GENERATE',
-      } satisfies RuntimeRequest);
-      if (!res?.ok) {
-        setErrorBanner(res?.error || '番組生成に失敗しました');
-      } else if (Array.isArray(res.warnings) && res.warnings.length > 0) {
-        setErrorBanner(res.warnings.join(' / '));
-      }
-      await refreshData();
-    } catch (err) {
-      setErrorBanner(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusyMessage('');
+    const res = await chrome.runtime.sendMessage({
+      type: 'PATROL_AND_GENERATE',
+    } satisfies RuntimeRequest);
+    if (!res?.ok) {
+      setErrorBanner(res?.error || '番組生成を開始できませんでした');
+    } else {
+      setIsJobRunning(true);
+    }
+  };
+
+  const handlePatrolTabGroup = async () => {
+    if (selectedGroupId === '') return;
+    setErrorBanner('');
+    setTab('player');
+    const res = await chrome.runtime.sendMessage({
+      type: 'PATROL_TAB_GROUP',
+      groupId: Number(selectedGroupId),
+      generateAfter: true,
+    } satisfies RuntimeRequest);
+    if (!res?.ok) {
+      setErrorBanner(res?.error || 'タブグループ巡回を開始できませんでした');
+    } else {
+      setIsJobRunning(true);
     }
   };
 
   const handleGenerateFromQueueOnly = async () => {
     setErrorBanner('');
     setTab('player');
-    setBusyMessage('未読キューのネタから番組台本・音声を生成中...');
+    const res = await chrome.runtime.sendMessage({
+      type: 'GENERATE_EPISODE_FROM_QUEUE',
+    } satisfies RuntimeRequest);
+    if (!res?.ok) {
+      setErrorBanner(res?.error || '番組生成を開始できませんでした');
+    } else {
+      setIsJobRunning(true);
+    }
+  };
+
+  const handleDeleteCurrentEpisode = async () => {
+    if (!displayedEpisode) return;
+    await chrome.runtime.sendMessage({
+      type: 'DELETE_EPISODE',
+      episodeId: displayedEpisode.id,
+    } satisfies RuntimeRequest);
+    showToast('エピソードを削除しました');
+    await refreshData();
+  };
+
+  const handleCleanupStale = async () => {
+    const res = await chrome.runtime.sendMessage({
+      type: 'CLEANUP_STALE_EPISODES',
+    } satisfies RuntimeRequest);
+    showToast(`${res?.removed ?? 0} 件の未完了エピソードを整理しました`);
+    await refreshData();
+  };
+
+  const handleDownloadAudio = async () => {
+    if (!displayedEpisode) return;
     try {
-      const res = await chrome.runtime.sendMessage({
-        type: 'GENERATE_EPISODE_FROM_QUEUE',
-      } satisfies RuntimeRequest);
-      if (!res?.ok) {
-        setErrorBanner(res?.error || '番組生成に失敗しました');
+      const ok = await downloadEpisodeAudio(displayedEpisode);
+      if (ok) {
+        showToast('結合済みポッドキャスト音声を保存しました');
+      } else {
+        setErrorBanner(
+          'このエピソードはWeb Speech再生専用のため音声ファイルがありません。HTMLまたはMarkdown保存をご利用ください。'
+        );
       }
-      await refreshData();
     } catch (err) {
       setErrorBanner(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusyMessage('');
+    }
+  };
+
+  const handleDownloadHtml = async () => {
+    if (!displayedEpisode) return;
+    try {
+      await downloadPortableHtmlPlayer(displayedEpisode);
+      showToast('音声＆台本入りポータブルHTMLを保存しました');
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleCopyMarkdown = async () => {
+    if (!displayedEpisode) return;
+    try {
+      await copyEpisodeMarkdown(displayedEpisode);
+      showToast('台本と参照リンク集（Markdown）をコピーしました');
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleShareEpisode = async () => {
+    if (!displayedEpisode) return;
+    try {
+      const outcome = await shareEpisodeNative(displayedEpisode);
+      showToast(
+        outcome === 'shared'
+          ? '共有シートを開きました'
+          : '台本＆リンク集をクリップボードにコピーしました'
+      );
+    } catch (err) {
+      // User canceling native share sheet is not an error
+      if (err instanceof Error && err.name === 'AbortError') return;
+      setErrorBanner(err instanceof Error ? err.message : String(err));
     }
   };
 
@@ -241,20 +407,33 @@ export function App() {
             <span className="brand-mark" aria-hidden="true" />
             agentCast
           </h1>
-          {pendingBuild && (
-            <button
-              id="btn-apply-hot-reload"
-              type="button"
-              className="reload-notice-btn"
-              onClick={() =>
-                chrome.runtime.sendMessage({
-                  type: 'TRIGGER_DEV_RELOAD_NOW',
-                } satisfies RuntimeRequest)
-              }
-            >
-              更新あり・クリックで反映
-            </button>
-          )}
+          <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+            {staleCount > 0 && (
+              <button
+                id="btn-cleanup-stale"
+                type="button"
+                className="btn-ghost"
+                onClick={handleCleanupStale}
+                title="中断された未完了エピソードを一括削除"
+              >
+                未完了整理 ({staleCount})
+              </button>
+            )}
+            {pendingBuild && (
+              <button
+                id="btn-apply-hot-reload"
+                type="button"
+                className="reload-notice-btn"
+                onClick={() =>
+                  chrome.runtime.sendMessage({
+                    type: 'TRIGGER_DEV_RELOAD_NOW',
+                  } satisfies RuntimeRequest)
+                }
+              >
+                更新反映
+              </button>
+            )}
+          </div>
         </div>
 
         <div className="action-strip">
@@ -262,22 +441,71 @@ export function App() {
             id="btn-patrol-and-generate"
             type="button"
             className="btn-primary"
-            disabled={Boolean(busyMessage)}
+            disabled={isJobRunning}
             onClick={handlePatrolAndGenerate}
+            title="登録5サイトを専用タブグループで巡回して番組を生成"
           >
             巡回して番組作成
+          </button>
+          <button
+            id="btn-instant-active-tab"
+            type="button"
+            className="btn-secondary"
+            disabled={isJobRunning}
+            onClick={handleCaptureAndGenerateActiveTab}
+            title="現在開いているページ（Changelogや記事等）だけで即座に1番組を作成"
+          >
+            今のタブを番組化
           </button>
           <button
             id="btn-capture-active-tab"
             type="button"
             className="btn-secondary"
-            disabled={Boolean(busyMessage)}
+            disabled={isJobRunning}
             onClick={handleCaptureActiveTab}
-            title="現在開いているタブの記事やタイムラインを未読キューに追加"
+            title="現在開いているタブの記事を未読キューに追加"
           >
-            ＋ 今のタブ
+            ＋キュー
           </button>
         </div>
+
+        {tabGroups.length > 0 && (
+          <div className="tabgroup-strip">
+            <select
+              id="select-tab-group"
+              className="episode-select"
+              value={selectedGroupId}
+              onChange={(e) => setSelectedGroupId(Number(e.target.value))}
+              aria-label="巡回するタブグループを選択"
+            >
+              {tabGroups.map((g) => (
+                <option key={g.id} value={g.id}>
+                  📁 {g.title} ({g.tabCount}タブ)
+                </option>
+              ))}
+            </select>
+            <button
+              id="btn-patrol-tab-group"
+              type="button"
+              className="btn-secondary"
+              disabled={isJobRunning || selectedGroupId === ''}
+              onClick={handlePatrolTabGroup}
+              title="選択したタブグループ内の全タブを巡回して番組を作成"
+            >
+              グループ番組化
+            </button>
+            <button
+              id="btn-refresh-tab-groups"
+              type="button"
+              className="btn-ghost"
+              onClick={() => void refreshTabGroups()}
+              title="タブグループ一覧を更新"
+              aria-label="タブグループ一覧を更新"
+            >
+              ↻
+            </button>
+          </div>
+        )}
 
         <nav className="nav-tabs" aria-label="メインナビゲーション">
           <button
@@ -306,9 +534,9 @@ export function App() {
           </button>
         </nav>
 
-        {(busyMessage || displayedEpisode?.statusDetail) && (
+        {(busyMessage || toastMessage || displayedEpisode?.statusDetail) && (
           <div className="status-banner" role="status">
-            <span>{busyMessage || displayedEpisode?.statusDetail}</span>
+            <span>{busyMessage || toastMessage || displayedEpisode?.statusDetail}</span>
           </div>
         )}
 
@@ -356,6 +584,16 @@ export function App() {
                     >
                       {playback.playbackRate.toFixed(2).replace(/\.00$/, '.0')}x
                     </button>
+                    <button
+                      id="btn-delete-episode"
+                      type="button"
+                      className="ctrl-btn"
+                      onClick={handleDeleteCurrentEpisode}
+                      title="このエピソードを削除"
+                      aria-label="このエピソードを削除"
+                    >
+                      🗑
+                    </button>
                   </div>
 
                   {displayedChapter ? (
@@ -383,7 +621,9 @@ export function App() {
                     <span>
                       {isSelectedPlayingEpisode
                         ? formatSec(playback.durationSec)
-                        : formatSec(displayedChapter?.durationSec || displayedEpisode.totalDurationSec)}
+                        : formatSec(
+                            displayedChapter?.durationSec || displayedEpisode.totalDurationSec
+                          )}
                     </span>
                   </div>
 
@@ -460,6 +700,49 @@ export function App() {
                       title="次のチャプターへスキップ（Bluetoothイヤホンの次曲操作に対応）"
                     >
                       次話 ⏭
+                    </button>
+                  </div>
+
+                  <div className="share-strip" aria-label="番組の保存と共有">
+                    <button
+                      id="btn-export-audio"
+                      type="button"
+                      className="share-btn"
+                      disabled={!hasAudioExportable}
+                      onClick={handleDownloadAudio}
+                      title="全チャプターを結合した音声ファイル（WAV/MP3）を保存"
+                    >
+                      音声保存
+                    </button>
+                    <button
+                      id="btn-export-html"
+                      type="button"
+                      className="share-btn"
+                      disabled={displayedEpisode.chapters.length === 0}
+                      onClick={handleDownloadHtml}
+                      title="音声＋台本＋リンクが1ファイルに収まった単体プレイヤーHTMLを保存"
+                    >
+                      HTML保存
+                    </button>
+                    <button
+                      id="btn-copy-markdown"
+                      type="button"
+                      className="share-btn"
+                      disabled={displayedEpisode.chapters.length === 0}
+                      onClick={handleCopyMarkdown}
+                      title="台本と参照元URLをMarkdown形式でコピー"
+                    >
+                      台本コピー
+                    </button>
+                    <button
+                      id="btn-share-episode"
+                      type="button"
+                      className="share-btn"
+                      disabled={displayedEpisode.chapters.length === 0}
+                      onClick={handleShareEpisode}
+                      title="macOS共有シート（AirDrop等）またはクリップボードで共有"
+                    >
+                      共有 ↗
                     </button>
                   </div>
 
@@ -567,7 +850,7 @@ export function App() {
                 id="btn-generate-from-queue"
                 type="button"
                 className="btn-primary"
-                disabled={queue.length === 0 || Boolean(busyMessage)}
+                disabled={queue.length === 0 || isJobRunning}
                 onClick={handleGenerateFromQueueOnly}
               >
                 キュー ({queue.length}件) から番組作成
@@ -587,8 +870,7 @@ export function App() {
             {queue.length === 0 ? (
               <div className="empty-box">
                 <p>
-                  未読キューは空です。X・Note・Zenn・Yahoo!・Google Newsを普段通り閲覧するか、「＋
-                  今のタブ」「巡回して番組作成」を押すとここに記事が貯まります。
+                  未読キューは空です。X・Note・Zenn・Yahoo!・Google Newsを普段通り閲覧するか、「＋キュー」「巡回して番組作成」を押すとここに記事が貯まります。
                 </p>
               </div>
             ) : (

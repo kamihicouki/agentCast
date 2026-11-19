@@ -114,9 +114,51 @@ body,
 
 .action-strip {
   display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 7px;
-  margin-bottom: 10px;
+  grid-template-columns: 1fr auto auto;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.tabgroup-strip {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.share-strip {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 5px;
+  margin-top: 9px;
+  padding-top: 9px;
+  border-top: 1px solid var(--line-subtle);
+}
+
+.share-btn {
+  appearance: none;
+  border: 1px solid var(--line-subtle);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 5px 4px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 130ms ease, color 130ms ease;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.share-btn:hover:not(:disabled) {
+  background: var(--bg-surface-hover);
+  color: var(--text-primary);
+}
+
+.share-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .btn-primary,

@@ -132,6 +132,7 @@ function generateManifest() {
     'offscreen',
     'alarms',
     'tabs',
+    'tabGroups',
     'scripting',
     'activeTab',
   ];

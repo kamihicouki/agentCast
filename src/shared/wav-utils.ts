@@ -107,3 +107,86 @@ export function ensurePlayableAudioBlob(
     mimeType: 'audio/wav',
   };
 }
+
+/**
+ * Merges multiple chapter audio blobs into a single playable WAV (or MP3) file,
+ * inserting a clean 0.6s silence pause between WAV chapters.
+ */
+export async function mergeAudioBlobs(
+  blobs: Array<{ blob: Blob; mimeType: string }>
+): Promise<{ blob: Blob; mimeType: string; ext: 'wav' | 'mp3' }> {
+  if (blobs.length === 0) {
+    throw new Error('結合可能な音声データがありません。');
+  }
+
+  const allMp3 = blobs.every((b) => b.mimeType.includes('mpeg') || b.mimeType.includes('mp3'));
+  if (allMp3) {
+    const parts = await Promise.all(blobs.map((b) => b.blob.arrayBuffer()));
+    return {
+      blob: new Blob(parts, { type: 'audio/mpeg' }),
+      mimeType: 'audio/mpeg',
+      ext: 'mp3',
+    };
+  }
+
+  let sampleRate = 24000;
+  let numChannels = 1;
+  let bitsPerSample = 16;
+  const pcmSegments: Uint8Array[] = [];
+
+  for (const item of blobs) {
+    const bytes = new Uint8Array(await item.blob.arrayBuffer());
+    if (isRiffWav(bytes)) {
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      numChannels = view.getUint16(22, true) || 1;
+      sampleRate = view.getUint32(24, true) || 24000;
+      bitsPerSample = view.getUint16(34, true) || 16;
+
+      // Locate the "data" subchunk safely (handles extended WAV headers)
+      let offset = 12;
+      let dataStart = 44;
+      let dataLen = bytes.byteLength - 44;
+      while (offset + 8 <= bytes.byteLength) {
+        const chunkId = String.fromCharCode(
+          bytes[offset],
+          bytes[offset + 1],
+          bytes[offset + 2],
+          bytes[offset + 3]
+        );
+        const chunkSize = view.getUint32(offset + 4, true);
+        if (chunkId === 'data') {
+          dataStart = offset + 8;
+          dataLen = Math.min(chunkSize, bytes.byteLength - dataStart);
+          break;
+        }
+        offset += 8 + chunkSize + (chunkSize % 2);
+      }
+      pcmSegments.push(bytes.subarray(dataStart, dataStart + dataLen));
+    } else {
+      pcmSegments.push(bytes);
+    }
+  }
+
+  const bytesPerSample = (bitsPerSample / 8) * numChannels;
+  const gapBytes = Math.round(sampleRate * 0.6) * bytesPerSample;
+  const totalPcmBytes =
+    pcmSegments.reduce((sum, seg) => sum + seg.byteLength, 0) +
+    Math.max(0, pcmSegments.length - 1) * gapBytes;
+
+  const mergedPcm = new Uint8Array(totalPcmBytes);
+  let cursor = 0;
+  for (let i = 0; i < pcmSegments.length; i++) {
+    mergedPcm.set(pcmSegments[i], cursor);
+    cursor += pcmSegments[i].byteLength;
+    if (i < pcmSegments.length - 1) {
+      cursor += gapBytes; // Zero-filled Uint8Array produces clean digital silence
+    }
+  }
+
+  const finalWav = wrapPcm16ToWav(mergedPcm, sampleRate, numChannels, bitsPerSample);
+  return {
+    blob: new Blob([toBlobPart(finalWav)], { type: 'audio/wav' }),
+    mimeType: 'audio/wav',
+    ext: 'wav',
+  };
+}

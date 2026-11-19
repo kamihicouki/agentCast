@@ -1,4 +1,5 @@
 import type { ExtractionResultPayload } from '../shared/messages';
+import type { ExtractedCandidate } from '../shared/types';
 import { detectSourceFromUrl } from '../shared/url-utils';
 import { checkPageAccessGuard } from './login-guard';
 import { extractXTimeline } from './x-timeline';
@@ -6,6 +7,7 @@ import { extractNote } from './note';
 import { extractZenn } from './zenn';
 import { extractYahooNews } from './yahoo-news';
 import { extractGoogleNews } from './google-news';
+import { extractChangelog, isChangelogPage } from './changelog';
 import { extractGenericReadability } from './generic-readability';
 
 export function extractFromDocument(doc: Document, pageUrl: string): ExtractionResultPayload {
@@ -20,27 +22,33 @@ export function extractFromDocument(doc: Document, pageUrl: string): ExtractionR
   }
 
   const source = detectSourceFromUrl(pageUrl);
-  let candidates = [];
+  let candidates: ExtractedCandidate[] = [];
 
-  switch (source) {
-    case 'x':
-      candidates = extractXTimeline(doc, pageUrl);
-      break;
-    case 'note':
-      candidates = extractNote(doc, pageUrl);
-      break;
-    case 'zenn':
-      candidates = extractZenn(doc, pageUrl);
-      break;
-    case 'yahoo_news':
-      candidates = extractYahooNews(doc, pageUrl);
-      break;
-    case 'google_news':
-      candidates = extractGoogleNews(doc, pageUrl);
-      break;
-    default:
-      candidates = extractGenericReadability(doc, pageUrl);
-      break;
+  if (source === 'generic' && isChangelogPage(doc, pageUrl)) {
+    candidates = extractChangelog(doc, pageUrl);
+  }
+
+  if (candidates.length === 0) {
+    switch (source) {
+      case 'x':
+        candidates = extractXTimeline(doc, pageUrl);
+        break;
+      case 'note':
+        candidates = extractNote(doc, pageUrl);
+        break;
+      case 'zenn':
+        candidates = extractZenn(doc, pageUrl);
+        break;
+      case 'yahoo_news':
+        candidates = extractYahooNews(doc, pageUrl);
+        break;
+      case 'google_news':
+        candidates = extractGoogleNews(doc, pageUrl);
+        break;
+      default:
+        candidates = extractGenericReadability(doc, pageUrl);
+        break;
+    }
   }
 
   // Fallback to Readability if a specific site page didn't match timeline selectors
@@ -60,5 +68,6 @@ export {
   extractZenn,
   extractYahooNews,
   extractGoogleNews,
+  extractChangelog,
   extractGenericReadability,
 };

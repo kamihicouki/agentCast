@@ -373,3 +373,17 @@ chrome.runtime.onMessage.addListener((message: RuntimeRequest, _sender, sendResp
       return false;
   }
 });
+
+// Keep-alive port so MV3 Service Worker never gets terminated mid-generation (30s idle cutoff)
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== 'agentcast-keepalive') return;
+  port.onMessage.addListener((msg) => {
+    if (msg?.type === 'PING') {
+      try {
+        port.postMessage({ type: 'PONG', ts: Date.now() });
+      } catch {
+        // port closed
+      }
+    }
+  });
+});

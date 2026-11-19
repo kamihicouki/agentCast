@@ -16,9 +16,15 @@ export interface ExtractionResultPayload {
 
 export type RuntimeRequest =
   | { type: 'CAPTURE_ACTIVE_TAB' }
+  | { type: 'CAPTURE_AND_GENERATE_ACTIVE_TAB' }
   | { type: 'PATROL_SOURCES'; sources?: SourceId[] }
   | { type: 'PATROL_AND_GENERATE'; sources?: SourceId[] }
+  | { type: 'LIST_TAB_GROUPS' }
+  | { type: 'PATROL_TAB_GROUP'; groupId: number; generateAfter?: boolean }
   | { type: 'GENERATE_EPISODE_FROM_QUEUE' }
+  | { type: 'DELETE_EPISODE'; episodeId: string }
+  | { type: 'CLEANUP_STALE_EPISODES' }
+  | { type: 'GET_JOB_STATUS' }
   | { type: 'CREATE_DEMO_EPISODE' }
   | { type: 'PASSIVE_CANDIDATES'; candidates: ExtractedCandidate[]; pageUrl: string }
   | { type: 'CONTENT_EXTRACT_NOW'; scrollSteps?: number }

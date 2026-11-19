@@ -12,9 +12,11 @@ import {
   SOURCE_META,
   type ExtractedCandidate,
   type ExtensionSettings,
+  type FeedItem,
   type PlaybackState,
   type PodcastEpisode,
   type SourceId,
+  type TabGroupSummary,
 } from '../../shared/types';
 import type { ExtractionResultPayload, RuntimeRequest } from '../../shared/messages';
 import { parseZennRssXml } from '../../extractors/zenn';
@@ -34,20 +36,74 @@ import {
 } from '../../providers/personal-only/dev-reloader';
 
 const ALARM_MORNING_CAST = 'agentcast_scheduled_generation';
+const PATROL_GROUP_TITLE = 'agentCast 巡回中';
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 let latestPlaybackState: PlaybackState = { ...INITIAL_PLAYBACK_STATE };
-let isGeneratingEpisode = false;
+let isJobRunning = false;
+let currentJobMessage = '';
+let lastJobError = '';
 
 // Open Side Panel automatically when clicking the toolbar icon
 chrome.sidePanel
   .setPanelBehavior({ openPanelOnActionClick: true })
   .catch((err) => console.warn('[agentCast] sidePanel.setPanelBehavior warning:', err));
 
-// Start Cloud -> Local Chrome instant auto-reloader (main personal branch only)
-startDevAutoReloader(() => latestPlaybackState.isPlaying);
+// Guard Dev Auto-Reloader during BOTH audio playback AND active generation jobs!
+startDevAutoReloader(() => latestPlaybackState.isPlaying || isJobRunning);
+
+/**
+ * Marks any orphaned "generating_script / synthesizing_audio / collecting" episodes left behind
+ * by a previous Service Worker restart or crash as failed so they don't clutter the dropdown forever.
+ */
+async function cleanupStaleEpisodes(deleteStale = false): Promise<number> {
+  const all = await db.episodes.toArray();
+  const now = Date.now();
+  let affected = 0;
+
+  for (const ep of all) {
+    const isPending =
+      ep.status === 'collecting' ||
+      ep.status === 'generating_script' ||
+      ep.status === 'synthesizing_audio';
+    if (!isPending && !(deleteStale && ep.status === 'error')) continue;
+
+    const lastTouch = Date.parse(ep.updatedAt || ep.createdAt) || 0;
+    const isOrphaned = !isJobRunning && (deleteStale || now - lastTouch > 150_000);
+    if (!isOrphaned) continue;
+
+    if (deleteStale || ep.chapters.length === 0) {
+      await deleteEpisodeById(ep.id);
+    } else {
+      await db.episodes.update(ep.id, {
+        status: 'error',
+        statusDetail: undefined,
+        errorMessage: '前回の生成が途中で中断されました。',
+        updatedAt: new Date().toISOString(),
+      });
+    }
+    affected++;
+  }
+
+  if (affected > 0) {
+    broadcastEvent({ type: 'EPISODES_UPDATED' });
+  }
+  return affected;
+}
+
+async function deleteEpisodeById(episodeId: string): Promise<void> {
+  await db.transaction('rw', db.episodes, db.chapterAudio, async () => {
+    await db.episodes.delete(episodeId);
+    await db.chapterAudio.where('episodeId').equals(episodeId).delete();
+  });
+  broadcastEvent({ type: 'EPISODES_UPDATED' });
+}
+
+// Run orphan cleanup shortly after Service Worker startup
+void cleanupStaleEpisodes(false);
 
 chrome.runtime.onInstalled.addListener(async () => {
+  await cleanupStaleEpisodes(true);
   const existingCount = await db.episodes.count();
   if (existingCount === 0) {
     const settings = await getSettings();
@@ -78,7 +134,9 @@ async function syncDailyAlarm(): Promise<void> {
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === ALARM_MORNING_CAST) {
-    void patrolAndGenerateEpisode();
+    void runBackgroundJob('定時巡回＆番組編成を開始しました...', async () => {
+      await patrolAndGenerateEpisode();
+    });
   }
 });
 
@@ -101,7 +159,8 @@ async function ensureOffscreenDocument(): Promise<void> {
     .createDocument({
       url: 'offscreen.html',
       reasons: [chrome.offscreen.Reason.AUDIO_PLAYBACK],
-      justification: 'Side Panelの開閉やタブ移動に依存せずポッドキャスト音声とMediaSessionを維持するため',
+      justification:
+        'Side Panelの開閉やタブ移動に依存せずポッドキャスト音声とMediaSession、長時間生成ジョブの安定動作を維持するため',
     })
     .finally(() => {
       creatingOffscreen = null;
@@ -110,8 +169,67 @@ async function ensureOffscreenDocument(): Promise<void> {
   await creatingOffscreen;
 }
 
+/**
+ * Maintains an active Port to the Offscreen Document for the duration of a long-running job,
+ * preventing Chrome MV3 from terminating the Service Worker after 30 seconds of idle time.
+ */
+async function withServiceWorkerKeepAlive<T>(fn: () => Promise<T>): Promise<T> {
+  let port: chrome.runtime.Port | null = null;
+  let pingTimer: ReturnType<typeof setInterval> | null = null;
+
+  try {
+    await ensureOffscreenDocument();
+    port = chrome.runtime.connect({ name: 'agentcast-keepalive' });
+    pingTimer = setInterval(() => {
+      try {
+        port?.postMessage({ type: 'PING', ts: Date.now() });
+      } catch {
+        // Ignore if port already closed
+      }
+    }, 15_000);
+    return await fn();
+  } finally {
+    if (pingTimer) clearInterval(pingTimer);
+    try {
+      port?.disconnect();
+    } catch {
+      // Ignore
+    }
+  }
+}
+
 function broadcastEvent(payload: Record<string, unknown>): void {
   chrome.runtime.sendMessage(payload).catch(() => {});
+}
+
+function updateJobProgress(message: string): void {
+  currentJobMessage = message;
+  broadcastEvent({ type: 'PATROL_PROGRESS', message, isJobRunning });
+}
+
+async function runBackgroundJob(
+  initialMessage: string,
+  task: () => Promise<{ warnings?: string[] } | void>
+): Promise<void> {
+  if (isJobRunning) return;
+  isJobRunning = true;
+  lastJobError = '';
+  updateJobProgress(initialMessage);
+
+  try {
+    const res = await withServiceWorkerKeepAlive(task);
+    if (res && Array.isArray(res.warnings) && res.warnings.length > 0) {
+      lastJobError = res.warnings.join(' / ');
+      broadcastEvent({ type: 'JOB_WARNING', message: lastJobError });
+    }
+  } catch (err) {
+    lastJobError = err instanceof Error ? err.message : String(err);
+    broadcastEvent({ type: 'JOB_ERROR', message: lastJobError });
+  } finally {
+    isJobRunning = false;
+    updateJobProgress('');
+    broadcastEvent({ type: 'JOB_FINISHED', error: lastJobError });
+  }
 }
 
 async function waitForTabReady(tabId: number, timeoutMs = 16000): Promise<void> {
@@ -159,21 +277,94 @@ async function extractFromTab(
 async function captureActiveTab(): Promise<{
   inserted: number;
   updated: number;
+  items: FeedItem[];
   warning?: string;
 }> {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.id || !tab.url || tab.url.startsWith('chrome://') || tab.url.startsWith('chrome-extension://')) {
+  if (
+    !tab?.id ||
+    !tab.url ||
+    tab.url.startsWith('chrome://') ||
+    tab.url.startsWith('chrome-extension://')
+  ) {
     throw new Error('現在のタブは読み取り対象外のページ（Chrome内部ページ等）です。');
   }
 
-  const res = await extractFromTab(tab.id, 1);
+  const res = await extractFromTab(tab.id, 0);
   if (res.blocked) {
-    return { inserted: 0, updated: 0, warning: res.blockMessage };
+    return { inserted: 0, updated: 0, items: [], warning: res.blockMessage };
   }
 
   const stored = await ingestCandidates(res.candidates);
   broadcastEvent({ type: 'QUEUE_UPDATED' });
-  return { inserted: stored.inserted, updated: stored.updated };
+  return { inserted: stored.inserted, updated: stored.updated, items: stored.items };
+}
+
+async function listUserTabGroups(): Promise<TabGroupSummary[]> {
+  if (!chrome.tabGroups?.query) return [];
+  const groups = await chrome.tabGroups.query({});
+  const summaries: TabGroupSummary[] = [];
+
+  for (const g of groups) {
+    if (g.title === PATROL_GROUP_TITLE) continue;
+    const tabs = await chrome.tabs.query({ groupId: g.id });
+    const readableTabs = tabs.filter(
+      (t) =>
+        t.url &&
+        !t.url.startsWith('chrome://') &&
+        !t.url.startsWith('chrome-extension://')
+    );
+    if (readableTabs.length === 0) continue;
+
+    summaries.push({
+      id: g.id,
+      title: g.title || `無題グループ (${g.color})`,
+      color: g.color,
+      tabCount: readableTabs.length,
+    });
+  }
+
+  return summaries;
+}
+
+async function patrolTabGroup(groupId: number): Promise<{
+  inserted: number;
+  items: FeedItem[];
+  warnings: string[];
+}> {
+  const tabs = await chrome.tabs.query({ groupId });
+  const readableTabs = tabs.filter(
+    (t): t is chrome.tabs.Tab & { id: number; url: string } =>
+      Boolean(t.id && t.url && !t.url.startsWith('chrome://') && !t.url.startsWith('chrome-extension://'))
+  );
+
+  if (readableTabs.length === 0) {
+    throw new Error('選択したタブグループに読み取り可能なWebページがありません。');
+  }
+
+  let totalInserted = 0;
+  const collectedItems: FeedItem[] = [];
+  const warnings: string[] = [];
+
+  for (let i = 0; i < readableTabs.length; i++) {
+    const t = readableTabs[i];
+    updateJobProgress(
+      `タブグループ巡回中 (${i + 1}/${readableTabs.length}): ${(t.title || t.url).slice(0, 28)}…`
+    );
+
+    const extracted = await extractFromTab(t.id, 0);
+    if (extracted.blocked) {
+      warnings.push(`${t.title || t.url}: ${extracted.blockMessage || 'スキップ'}`);
+      continue;
+    }
+
+    const saved = await ingestCandidates(extracted.candidates.slice(0, 12));
+    totalInserted += saved.inserted;
+    collectedItems.push(...saved.items);
+    broadcastEvent({ type: 'QUEUE_UPDATED' });
+  }
+
+  return { inserted: totalInserted, items: collectedItems, warnings };
 }
 
 async function patrolSources(requestedSources?: SourceId[]): Promise<{
@@ -194,10 +385,7 @@ async function patrolSources(requestedSources?: SourceId[]): Promise<{
   // 1. Fast RSS check for Zenn first (zero tab overhead!)
   if (targetSources.includes('zenn')) {
     try {
-      broadcastEvent({
-        type: 'PATROL_PROGRESS',
-        message: 'Zenn トレンドフィードを取得中...',
-      });
+      updateJobProgress('Zenn トレンドフィードを取得中...');
       const rssRes = await fetch('https://zenn.dev/feed');
       if (rssRes.ok) {
         const xml = await rssRes.text();
@@ -211,24 +399,34 @@ async function patrolSources(requestedSources?: SourceId[]): Promise<{
     }
   }
 
-  // 2. Controlled single background tab patrol using user's signed-in browser session
+  // 2. Controlled single background tab patrol grouped clearly as "agentCast 巡回中"
   const patrolTab = await chrome.tabs.create({ url: 'about:blank', active: false });
   const patrolTabId = patrolTab.id;
 
   if (patrolTabId) {
     try {
+      // Visually group the patrol tab in Chrome so it never confuses the user
+      if (chrome.tabs.group && chrome.tabGroups?.update) {
+        try {
+          const groupId = await chrome.tabs.group({ tabIds: [patrolTabId] });
+          await chrome.tabGroups.update(groupId, {
+            title: PATROL_GROUP_TITLE,
+            color: 'orange',
+            collapsed: false,
+          });
+        } catch {
+          // Tab group creation can fail in popup/incognito windows; safe to proceed
+        }
+      }
+
       for (const source of targetSources) {
         const meta = SOURCE_META[source];
         if (!meta?.startUrl) continue;
 
-        broadcastEvent({
-          type: 'PATROL_PROGRESS',
-          message: `${meta.shortLabel} をログインセッションで読み取り中...`,
-        });
+        updateJobProgress(`${meta.shortLabel} をログインセッションで読み取り中...`);
 
         await chrome.tabs.update(patrolTabId, { url: meta.startUrl });
         await waitForTabReady(patrolTabId, 16000);
-        // Human-paced settle delay for SPA hydration (React/Next.js on X, Note, Google News)
         await sleep(source === 'x' || source === 'google_news' ? 2400 : 1500);
 
         const scrollSteps = source === 'x' ? 2 : source === 'note' ? 1 : 0;
@@ -252,17 +450,13 @@ async function patrolSources(requestedSources?: SourceId[]): Promise<{
 
       // 3. Expand top 4 headline/pickup items (e.g. Yahoo! Pickup -> Full Article, Note/Zenn body)
       for (const target of deepFetchQueue.slice(0, 4)) {
-        broadcastEvent({
-          type: 'PATROL_PROGRESS',
-          message: `注目記事の本文を展開中: ${target.title.slice(0, 28)}…`,
-        });
+        updateJobProgress(`注目記事の本文を展開中: ${target.title.slice(0, 28)}…`);
         await chrome.tabs.update(patrolTabId, { url: target.url });
         await waitForTabReady(patrolTabId, 14000);
         await sleep(1100);
 
         const deepExtracted = await extractFromTab(patrolTabId, 0);
         if (!deepExtracted.blocked && deepExtracted.candidates.length > 0) {
-          // If Yahoo Pickup returned the full article link, follow one hop
           const first = deepExtracted.candidates[0];
           if (
             target.source === 'yahoo_news' &&
@@ -287,7 +481,6 @@ async function patrolSources(requestedSources?: SourceId[]): Promise<{
   }
 
   broadcastEvent({ type: 'QUEUE_UPDATED' });
-  broadcastEvent({ type: 'PATROL_PROGRESS', message: '' });
   return { inserted: totalInserted, warnings };
 }
 
@@ -314,28 +507,31 @@ function getProviderLabels(settings: ExtensionSettings): {
   };
 }
 
-async function generateEpisodeFromQueue(): Promise<PodcastEpisode> {
-  if (isGeneratingEpisode) {
-    throw new Error('現在エピソードを生成中です。完了まで少々お待ちください。');
-  }
-
+async function generateEpisodeFromItems(
+  explicitItems?: FeedItem[]
+): Promise<PodcastEpisode> {
   const settings = await getSettings();
-  const queueItems = await getUnreadQueue(settings.maxItemsPerPatrol || 24);
+  const queueItems =
+    explicitItems && explicitItems.length > 0
+      ? explicitItems
+      : await getUnreadQueue(settings.maxItemsPerPatrol || 24);
+
   if (queueItems.length === 0) {
     throw new Error(
-      '未読キューが空です。「5サイト巡回して番組作成」または「現在のタブを追加」を実行してください。'
+      '未読キューが空です。「巡回して番組作成」または「＋ 今のタブ」を実行してください。'
     );
   }
 
-  isGeneratingEpisode = true;
   const episodeId = `ep-${Date.now()}`;
+  const nowIso = new Date().toISOString();
   const labels = getProviderLabels(settings);
 
   const placeholder: PodcastEpisode = {
     id: episodeId,
     title: '番組台本を構成中...',
     subtitle: `${queueItems.length}件の新着記事・SNSポストを整理しています`,
-    createdAt: new Date().toISOString(),
+    createdAt: nowIso,
+    updatedAt: nowIso,
     status: 'generating_script',
     statusDetail: `${labels.providerLabel} で2人掛け合い台本を作成中...`,
     providerLabel: labels.providerLabel,
@@ -346,12 +542,12 @@ async function generateEpisodeFromQueue(): Promise<PodcastEpisode> {
   };
 
   await db.episodes.put(placeholder);
+  updateJobProgress(`${labels.providerLabel} で番組台本を作成中...`);
   broadcastEvent({ type: 'EPISODES_UPDATED', episodeId });
 
   try {
     let generated: { title: string; subtitle: string; chapters: PodcastEpisode['chapters'] };
 
-    // Auto-fallback to Web Session or helpful error if API mode selected without key
     if (settings.aiMode === 'gemini_api') {
       generated = await generateScriptWithGemini(queueItems, settings);
     } else if (settings.aiMode === 'openai_api') {
@@ -362,7 +558,6 @@ async function generateEpisodeFromQueue(): Promise<PodcastEpisode> {
       generated = await generateScriptViaWebSession('gemini', queueItems, settings);
     }
 
-    // Decide effective TTS mode (auto-fallback to macos_speech if cloud TTS key is missing)
     let effectiveTts = settings.ttsMode;
     if (effectiveTts === 'gemini_tts' && !settings.geminiApiKey.trim()) {
       effectiveTts = 'macos_speech';
@@ -374,6 +569,7 @@ async function generateEpisodeFromQueue(): Promise<PodcastEpisode> {
       ...placeholder,
       title: generated.title,
       subtitle: generated.subtitle,
+      updatedAt: new Date().toISOString(),
       chapters: generated.chapters,
       totalDurationSec: generated.chapters.reduce((s, c) => s + c.durationSec, 0),
       status: effectiveTts === 'macos_speech' ? 'ready' : 'synthesizing_audio',
@@ -390,13 +586,15 @@ async function generateEpisodeFromQueue(): Promise<PodcastEpisode> {
     await db.episodes.put(episodeWithScript);
     broadcastEvent({ type: 'EPISODES_UPDATED', episodeId });
 
-    // Synthesize cloud multi-speaker audio chapter-by-chapter, auto-starting playback once Chapter 0 is ready!
     if (effectiveTts !== 'macos_speech') {
       let autoPlayTriggered = false;
 
       for (let i = 0; i < episodeWithScript.chapters.length; i++) {
         const ch = episodeWithScript.chapters[i];
-        episodeWithScript.statusDetail = `チャプター ${i + 1}/${episodeWithScript.chapters.length}「${ch.title.slice(0, 20)}」を音声合成中...`;
+        const progressText = `チャプター ${i + 1}/${episodeWithScript.chapters.length}「${ch.title.slice(0, 20)}」を音声合成中...`;
+        episodeWithScript.statusDetail = progressText;
+        episodeWithScript.updatedAt = new Date().toISOString();
+        updateJobProgress(progressText);
         await db.episodes.put({ ...episodeWithScript });
         broadcastEvent({ type: 'EPISODES_UPDATED', episodeId });
 
@@ -425,22 +623,22 @@ async function generateEpisodeFromQueue(): Promise<PodcastEpisode> {
             (s, c) => s + c.durationSec,
             0
           );
+          episodeWithScript.updatedAt = new Date().toISOString();
           await db.episodes.put({ ...episodeWithScript });
           broadcastEvent({ type: 'EPISODES_UPDATED', episodeId });
 
-          // Start streaming Chapter 0 immediately while remaining chapters synthesize in background!
           if (i === 0 && !autoPlayTriggered && !latestPlaybackState.isPlaying) {
             autoPlayTriggered = true;
             await playEpisodeInOffscreen(episodeWithScript, 0, settings.playbackRate);
           }
         } catch (ttsErr) {
           console.warn(`[agentCast] Chapter ${i} TTS fallback to Web Speech:`, ttsErr);
-          // Leave hasAudioBlob=false so Offscreen seamlessly speaks this chapter via macOS Web Speech
         }
       }
 
       episodeWithScript.status = 'ready';
       episodeWithScript.statusDetail = undefined;
+      episodeWithScript.updatedAt = new Date().toISOString();
       await db.episodes.put({ ...episodeWithScript });
     } else if (!latestPlaybackState.isPlaying) {
       await playEpisodeInOffscreen(episodeWithScript, 0, settings.playbackRate);
@@ -454,26 +652,18 @@ async function generateEpisodeFromQueue(): Promise<PodcastEpisode> {
     broadcastEvent({ type: 'QUEUE_UPDATED' });
     return episodeWithScript;
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    await db.episodes.update(episodeId, {
-      status: 'error',
-      errorMessage: message,
-      statusDetail: undefined,
-    });
-    broadcastEvent({ type: 'EPISODES_UPDATED', episodeId });
+    // Delete empty placeholder so "番組台本を構成中..." zombies never pile up in the episode picker
+    await deleteEpisodeById(episodeId);
     throw err;
-  } finally {
-    isGeneratingEpisode = false;
   }
 }
 
 async function patrolAndGenerateEpisode(sources?: SourceId[]): Promise<{
-  episode: PodcastEpisode;
   warnings: string[];
 }> {
   const patrolRes = await patrolSources(sources);
-  const episode = await generateEpisodeFromQueue();
-  return { episode, warnings: patrolRes.warnings };
+  await generateEpisodeFromItems();
+  return { warnings: patrolRes.warnings };
 }
 
 async function playEpisodeInOffscreen(
@@ -516,28 +706,96 @@ chrome.runtime.onMessage.addListener((message: RuntimeRequest, _sender, sendResp
         );
       return true;
 
-    case 'PATROL_SOURCES':
-      void patrolSources(message.sources)
-        .then((res) => sendResponse({ ok: true, ...res }))
+    case 'CAPTURE_AND_GENERATE_ACTIVE_TAB':
+      if (isJobRunning) {
+        sendResponse({ ok: false, error: '現在別の番組生成が実行中です。完了までお待ちください。' });
+        return false;
+      }
+      sendResponse({ ok: true, started: true });
+      void runBackgroundJob('現在のタブを読み取り中...', async () => {
+        const captured = await captureActiveTab();
+        if (captured.warning) {
+          throw new Error(captured.warning);
+        }
+        if (captured.items.length === 0) {
+          throw new Error('このページから読み取れる記事・リリース情報が見つかりませんでした。');
+        }
+        await generateEpisodeFromItems(captured.items);
+      });
+      return false;
+
+    case 'LIST_TAB_GROUPS':
+      void listUserTabGroups()
+        .then((groups) => sendResponse({ ok: true, groups }))
         .catch((err: unknown) =>
           sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) })
         );
       return true;
+
+    case 'PATROL_TAB_GROUP':
+      if (isJobRunning) {
+        sendResponse({ ok: false, error: '現在別の巡回・番組生成が実行中です。' });
+        return false;
+      }
+      sendResponse({ ok: true, started: true });
+      void runBackgroundJob('選択したタブグループを巡回中...', async () => {
+        const res = await patrolTabGroup(message.groupId);
+        if (message.generateAfter !== false && res.items.length > 0) {
+          await generateEpisodeFromItems(res.items);
+        }
+        return { warnings: res.warnings };
+      });
+      return false;
+
+    case 'PATROL_SOURCES':
+      if (isJobRunning) {
+        sendResponse({ ok: false, error: '現在別の巡回が実行中です。' });
+        return false;
+      }
+      sendResponse({ ok: true, started: true });
+      void runBackgroundJob('フォロー中サイトを巡回中...', async () => {
+        const res = await patrolSources(message.sources);
+        return { warnings: res.warnings };
+      });
+      return false;
 
     case 'GENERATE_EPISODE_FROM_QUEUE':
-      void generateEpisodeFromQueue()
-        .then((ep) => sendResponse({ ok: true, episode: ep }))
-        .catch((err: unknown) =>
-          sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) })
-        );
-      return true;
+      if (isJobRunning) {
+        sendResponse({ ok: false, error: '現在別の番組生成が実行中です。' });
+        return false;
+      }
+      sendResponse({ ok: true, started: true });
+      void runBackgroundJob('未読キューから番組台本を構成中...', async () => {
+        await generateEpisodeFromItems();
+      });
+      return false;
 
     case 'PATROL_AND_GENERATE':
-      void patrolAndGenerateEpisode(message.sources)
-        .then((res) => sendResponse({ ok: true, ...res }))
-        .catch((err: unknown) =>
-          sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) })
-        );
+      if (isJobRunning) {
+        sendResponse({ ok: false, error: '現在別の巡回・番組生成が実行中です。' });
+        return false;
+      }
+      sendResponse({ ok: true, started: true });
+      void runBackgroundJob('フォロー中サイトを巡回して番組を編成中...', async () => {
+        return patrolAndGenerateEpisode(message.sources);
+      });
+      return false;
+
+    case 'GET_JOB_STATUS':
+      sendResponse({
+        ok: true,
+        isJobRunning,
+        message: currentJobMessage,
+        lastError: lastJobError,
+      });
+      return false;
+
+    case 'DELETE_EPISODE':
+      void deleteEpisodeById(message.episodeId).then(() => sendResponse({ ok: true }));
+      return true;
+
+    case 'CLEANUP_STALE_EPISODES':
+      void cleanupStaleEpisodes(true).then((removed) => sendResponse({ ok: true, removed }));
       return true;
 
     case 'CREATE_DEMO_EPISODE':
