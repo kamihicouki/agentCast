@@ -249,6 +249,7 @@ async function buildOnce() {
     __AGENTCAST_TARGET__: JSON.stringify(buildTarget),
     __DEV_AUTO_RELOAD__: JSON.stringify(isPersonalMain),
     __AGENTCAST_BUILD_ID__: JSON.stringify(buildId),
+    __AGENTCAST_VERSION__: JSON.stringify(pkg.version),
   };
 
   fs.rmSync(outDir, { recursive: true, force: true });

@@ -667,6 +667,16 @@ export function App() {
           <h1 className="brand-title">
             <span className="brand-mark" aria-hidden="true" />
             agentCast
+            <span
+              style={{
+                fontFamily: 'var(--font-mono)',
+                fontSize: '10.5px',
+                fontWeight: 600,
+                color: 'var(--text-muted)',
+              }}
+            >
+              v{typeof __AGENTCAST_VERSION__ !== 'undefined' ? __AGENTCAST_VERSION__ : 'dev'}
+            </span>
           </h1>
           <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
             {staleCount > 0 && (

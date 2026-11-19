@@ -3,6 +3,8 @@ import type { DevBuildStatus } from '../../shared/messages';
 
 const RUNNING_BUILD_ID =
   typeof __AGENTCAST_BUILD_ID__ !== 'undefined' ? __AGENTCAST_BUILD_ID__ : '';
+const RUNNING_VERSION =
+  typeof __AGENTCAST_VERSION__ !== 'undefined' ? __AGENTCAST_VERSION__ : '0.0.0';
 
 let currentBuild: BuildMeta | null = RUNNING_BUILD_ID
   ? {
@@ -10,7 +12,7 @@ let currentBuild: BuildMeta | null = RUNNING_BUILD_ID
       contentHash: '',
       builtAt: '',
       target: 'main',
-      version: '0.1.0',
+      version: RUNNING_VERSION,
     }
   : null;
 let pendingBuild: BuildMeta | null = null;
