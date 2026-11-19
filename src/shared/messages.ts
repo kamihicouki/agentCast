@@ -59,7 +59,27 @@ export type RuntimeRequest =
   | { type: 'UPDATE_SETTINGS'; settings: Partial<ExtensionSettings> }
   | { type: 'START_GEMINI_KEY_SETUP' }
   | { type: 'GEMINI_KEY_CAPTURED'; apiKey: string; closeSetupTab?: boolean }
-  | { type: 'VERIFY_GEMINI_KEY'; apiKey?: string };
+  | { type: 'VERIFY_GEMINI_KEY'; apiKey?: string }
+  | { type: 'START_PUBLISH_JOB'; job: PendingPublishJob }
+  | { type: 'GET_PENDING_PUBLISH_JOB' }
+  | { type: 'CLEAR_PENDING_PUBLISH_JOB' };
+
+export interface PendingPublishJob {
+  id: string;
+  platform: 'youtube' | 'x';
+  targetUrl: string;
+  title: string;
+  description: string;
+  postText: string;
+  threadReplyText: string;
+  visibility?: 'unlisted' | 'private' | 'public';
+  channelName?: string;
+  expectedXHandle?: string;
+  fileName?: string;
+  mimeType?: string;
+  videoBase64?: string;
+  createdAt: number;
+}
 
 export interface DevBuildStatus {
   currentBuild: BuildMeta | null;

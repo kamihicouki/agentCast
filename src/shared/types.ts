@@ -201,6 +201,27 @@ export interface TabGroupSummary {
 
 export type AIMode = 'gemini_api' | 'openai_api' | 'web_chatgpt' | 'web_gemini';
 export type TTSMode = 'gemini_tts' | 'openai_tts' | 'macos_speech';
+export type YouTubeVisibility = 'unlisted' | 'private' | 'public';
+
+export interface PublishSettings {
+  youtubeChannelName: string;
+  youtubeChannelIdOrUrl: string;
+  youtubeDefaultVisibility: YouTubeVisibility;
+  youtubeHashtags: string;
+  xAccountHandle: string;
+  xHashtags: string;
+  xAttachVideo: boolean;
+}
+
+export const DEFAULT_PUBLISH_SETTINGS: PublishSettings = {
+  youtubeChannelName: '',
+  youtubeChannelIdOrUrl: '',
+  youtubeDefaultVisibility: 'unlisted',
+  youtubeHashtags: '#agentCast #AIポッドキャスト #テックニュース',
+  xAccountHandle: '',
+  xHashtags: '#agentCast #AIラジオ',
+  xAttachVideo: true,
+};
 
 export interface ExtensionSettings {
   aiMode: AIMode;
@@ -217,6 +238,7 @@ export interface ExtensionSettings {
   targetDurationMin: 5 | 10 | 15;
   enabledSources: Record<SourceId, boolean>;
   customSites: CustomSiteConfig[];
+  publish: PublishSettings;
   maxItemsPerPatrol: number;
   passiveCaptureEnabled: boolean;
   autoScheduleEnabled: boolean;
@@ -247,6 +269,7 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
     generic: true,
   },
   customSites: [],
+  publish: { ...DEFAULT_PUBLISH_SETTINGS },
   maxItemsPerPatrol: 24,
   passiveCaptureEnabled: true,
   autoScheduleEnabled: false,

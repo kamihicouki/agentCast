@@ -14,14 +14,22 @@ import {
   type PodcastEpisode,
   type SourceId,
   type TabGroupSummary,
+  type YouTubeVisibility,
 } from '../../shared/types';
-import type { DevBuildStatus, RuntimeRequest } from '../../shared/messages';
+import type { DevBuildStatus, PendingPublishJob, RuntimeRequest } from '../../shared/messages';
 import {
   copyEpisodeMarkdown,
   downloadEpisodeAudio,
   downloadPortableHtmlPlayer,
   shareEpisodeNative,
 } from '../../shared/export-utils';
+import {
+  blobToBase64,
+  buildXPostPayload,
+  buildYouTubeMetadata,
+  buildYouTubeStudioUploadUrl,
+  renderEpisodeToMp4,
+} from '../../shared/publish-utils';
 
 type ActiveTab = 'player' | 'queue' | 'settings';
 
@@ -418,6 +426,131 @@ export function App() {
       // User canceling native share sheet is not an error
       if (err instanceof Error && err.name === 'AbortError') return;
       setErrorBanner(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleDownloadMp4 = async () => {
+    if (!displayedEpisode || isJobRunning) return;
+    setErrorBanner('');
+    setBusyMessage('MP4動画をレンダリング中...');
+    try {
+      const rendered = await renderEpisodeToMp4(displayedEpisode, (msg) => setBusyMessage(msg));
+      if (!rendered) {
+        setErrorBanner(
+          'このエピソードは音声ファイルがありません（Gemini TTS または OpenAI TTS で生成した番組をお試しください）。'
+        );
+        return;
+      }
+      const url = URL.createObjectURL(rendered.blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = rendered.fileName;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      showToast(`MP4動画を保存しました (${rendered.fileName})`);
+    } catch (err) {
+      setErrorBanner(`MP4生成エラー: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setBusyMessage('');
+    }
+  };
+
+  const handlePublishToYouTube = async () => {
+    if (!displayedEpisode || isJobRunning) return;
+    setErrorBanner('');
+    setBusyMessage('YouTube 公開用 MP4 動画を準備中...');
+    try {
+      let videoBase64: string | undefined;
+      let fileName: string | undefined;
+      if (hasAudioExportable) {
+        const rendered = await renderEpisodeToMp4(displayedEpisode, (msg) => setBusyMessage(msg));
+        if (rendered) {
+          fileName = rendered.fileName;
+          setBusyMessage('YouTube Studio へ転送準備中...');
+          videoBase64 = await blobToBase64(rendered.blob);
+        }
+      }
+
+      const ytMeta = buildYouTubeMetadata(displayedEpisode, settings.publish);
+      const targetUrl = buildYouTubeStudioUploadUrl(settings.publish.youtubeChannelIdOrUrl);
+      const job: PendingPublishJob = {
+        id: `pub-yt-${Date.now()}`,
+        platform: 'youtube',
+        targetUrl,
+        title: ytMeta.title,
+        description: ytMeta.description,
+        postText: '',
+        threadReplyText: '',
+        visibility: settings.publish.youtubeDefaultVisibility,
+        channelName: settings.publish.youtubeChannelName,
+        fileName,
+        mimeType: 'video/mp4',
+        videoBase64,
+        createdAt: Date.now(),
+      };
+
+      const res = await chrome.runtime.sendMessage({
+        type: 'START_PUBLISH_JOB',
+        job,
+      } satisfies RuntimeRequest);
+
+      if (!res?.ok) {
+        await chrome.tabs.create({ url: targetUrl, active: true });
+      }
+      showToast('YouTube Studio を開きました。右下の公開ガイドから動画＆概要欄をセットできます');
+    } catch (err) {
+      setErrorBanner(`YouTube 公開準備エラー: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setBusyMessage('');
+    }
+  };
+
+  const handlePublishToX = async () => {
+    if (!displayedEpisode || isJobRunning) return;
+    setErrorBanner('');
+    setBusyMessage('X.com 投稿データを準備中...');
+    try {
+      let videoBase64: string | undefined;
+      let fileName: string | undefined;
+      if (settings.publish.xAttachVideo && hasAudioExportable) {
+        const rendered = await renderEpisodeToMp4(displayedEpisode, (msg) => setBusyMessage(msg));
+        if (rendered) {
+          fileName = rendered.fileName;
+          setBusyMessage('X.com コンポーザーへ転送準備中...');
+          videoBase64 = await blobToBase64(rendered.blob);
+        }
+      }
+
+      const xPayload = buildXPostPayload(displayedEpisode, settings.publish);
+      const targetUrl = `https://x.com/compose/post?text=${encodeURIComponent(xPayload.postText)}`;
+      const job: PendingPublishJob = {
+        id: `pub-x-${Date.now()}`,
+        platform: 'x',
+        targetUrl,
+        title: displayedEpisode.title,
+        description: '',
+        postText: xPayload.postText,
+        threadReplyText: xPayload.threadReplyText,
+        expectedXHandle: settings.publish.xAccountHandle,
+        fileName,
+        mimeType: 'video/mp4',
+        videoBase64,
+        createdAt: Date.now(),
+      };
+
+      const res = await chrome.runtime.sendMessage({
+        type: 'START_PUBLISH_JOB',
+        job,
+      } satisfies RuntimeRequest);
+
+      if (!res?.ok) {
+        await chrome.tabs.create({ url: targetUrl, active: true });
+      }
+      showToast('X.com の投稿画面を開きました。右下のガイドから動画添付＆最終確認ができます');
+    } catch (err) {
+      setErrorBanner(`X.com 投稿準備エラー: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setBusyMessage('');
     }
   };
 
@@ -1088,6 +1221,39 @@ export function App() {
                     </button>
                   </div>
 
+                  <div className="publish-strip" aria-label="YouTube・X.comへ公開">
+                    <button
+                      id="btn-publish-youtube"
+                      type="button"
+                      className="publish-btn"
+                      disabled={displayedEpisode.chapters.length === 0 || isJobRunning}
+                      onClick={handlePublishToYouTube}
+                      title="MP4動画を生成し、設定済みYouTube Studioチャンネルを半自動入力で開く"
+                    >
+                      📺 YouTube公開
+                    </button>
+                    <button
+                      id="btn-publish-x"
+                      type="button"
+                      className="publish-btn"
+                      disabled={displayedEpisode.chapters.length === 0 || isJobRunning}
+                      onClick={handlePublishToX}
+                      title="要約ポスト＆動画を準備してX.com投稿画面を開く"
+                    >
+                      𝕏 Xに投稿
+                    </button>
+                    <button
+                      id="btn-export-mp4"
+                      type="button"
+                      className="publish-btn"
+                      disabled={!hasAudioExportable || isJobRunning}
+                      onClick={handleDownloadMp4}
+                      title="チャプター表紙＋結合音声のMP4動画をローカルに保存"
+                    >
+                      🎬 MP4保存
+                    </button>
+                  </div>
+
                   <div className="bt-hint">
                     <span>Bluetooth「次の曲」操作 ＝ 次の話題チャプターへスキップ</span>
                   </div>
@@ -1388,6 +1554,163 @@ export function App() {
                   />
                 </div>
               )}
+            </div>
+
+            <div className="settings-group">
+              <h2 className="settings-group-title">公開先設定（YouTube / X.com）</h2>
+
+              <div className="field-row inline-two-col">
+                <div>
+                  <label className="field-label" htmlFor="input-yt-channel-name">
+                    YouTube チャンネル名（確認用）
+                  </label>
+                  <input
+                    id="input-yt-channel-name"
+                    type="text"
+                    className="field-input"
+                    placeholder="例：My Tech Radio"
+                    value={settings.publish.youtubeChannelName}
+                    onChange={(e) =>
+                      void handlePatchSettings({
+                        publish: {
+                          ...settings.publish,
+                          youtubeChannelName: e.target.value,
+                        },
+                      })
+                    }
+                  />
+                </div>
+                <div>
+                  <label className="field-label" htmlFor="select-yt-visibility">
+                    デフォルト公開範囲
+                  </label>
+                  <select
+                    id="select-yt-visibility"
+                    className="field-select"
+                    value={settings.publish.youtubeDefaultVisibility}
+                    onChange={(e) =>
+                      void handlePatchSettings({
+                        publish: {
+                          ...settings.publish,
+                          youtubeDefaultVisibility: e.target.value as YouTubeVisibility,
+                        },
+                      })
+                    }
+                  >
+                    <option value="unlisted">限定公開 (Unlisted)</option>
+                    <option value="private">非公開 (Private)</option>
+                    <option value="public">公開 (Public)</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="field-row">
+                <label className="field-label" htmlFor="input-yt-channel-url">
+                  YouTube チャンネル URL または Channel ID (UC...)
+                </label>
+                <input
+                  id="input-yt-channel-url"
+                  type="text"
+                  className="field-input"
+                  placeholder="https://studio.youtube.com/channel/UC...（空欄ならデフォルトチャンネル）"
+                  value={settings.publish.youtubeChannelIdOrUrl}
+                  onChange={(e) =>
+                    void handlePatchSettings({
+                      publish: {
+                        ...settings.publish,
+                        youtubeChannelIdOrUrl: e.target.value,
+                      },
+                    })
+                  }
+                />
+              </div>
+
+              <div className="field-row">
+                <label className="field-label" htmlFor="input-yt-hashtags">
+                  YouTube 概要欄ハッシュタグ
+                </label>
+                <input
+                  id="input-yt-hashtags"
+                  type="text"
+                  className="field-input"
+                  value={settings.publish.youtubeHashtags}
+                  onChange={(e) =>
+                    void handlePatchSettings({
+                      publish: {
+                        ...settings.publish,
+                        youtubeHashtags: e.target.value,
+                      },
+                    })
+                  }
+                />
+              </div>
+
+              <div className="field-row inline-two-col">
+                <div>
+                  <label className="field-label" htmlFor="input-x-handle">
+                    X.com 投稿アカウント (@handle)
+                  </label>
+                  <input
+                    id="input-x-handle"
+                    type="text"
+                    className="field-input"
+                    placeholder="@your_handle"
+                    value={settings.publish.xAccountHandle}
+                    onChange={(e) =>
+                      void handlePatchSettings({
+                        publish: {
+                          ...settings.publish,
+                          xAccountHandle: e.target.value,
+                        },
+                      })
+                    }
+                  />
+                </div>
+                <div>
+                  <label className="field-label" htmlFor="input-x-hashtags">
+                    X.com デフォルトハッシュタグ
+                  </label>
+                  <input
+                    id="input-x-hashtags"
+                    type="text"
+                    className="field-input"
+                    value={settings.publish.xHashtags}
+                    onChange={(e) =>
+                      void handlePatchSettings({
+                        publish: {
+                          ...settings.publish,
+                          xHashtags: e.target.value,
+                        },
+                      })
+                    }
+                  />
+                </div>
+              </div>
+
+              <div className="toggle-row">
+                <div>
+                  <div>X.com 投稿時にポッドキャスト動画 (MP4) を自動生成して添付</div>
+                  <p className="field-hint">
+                    OFF にするとテキスト要約＋参照リンクのみで素早く投稿画面を開きます
+                  </p>
+                </div>
+                <input
+                  id="toggle-x-attach-video"
+                  type="checkbox"
+                  checked={settings.publish.xAttachVideo}
+                  onChange={(e) =>
+                    void handlePatchSettings({
+                      publish: {
+                        ...settings.publish,
+                        xAttachVideo: e.target.checked,
+                      },
+                    })
+                  }
+                />
+              </div>
+              <p className="field-hint">
+                API 審査不要でログイン済みセッションをそのまま活かし、動画セット・タイトル・チャプター概要欄を半自動入力します（最終の「公開/ポスト」ボタンは必ずご自身で確認・押下する安全設計です）。
+              </p>
             </div>
 
             <div className="settings-group">

@@ -22,6 +22,7 @@ import {
 import type {
   CustomExtractRule,
   ExtractionResultPayload,
+  PendingPublishJob,
   RuntimeRequest,
 } from '../../shared/messages';
 import { parseZennRssXml } from '../../extractors/zenn';
@@ -44,6 +45,10 @@ import {
   injectAiStudioKeyHelper,
   verifyGeminiApiKey,
 } from '../../providers/personal-only/aistudio-key-helper';
+import {
+  injectXPublishHelper,
+  injectYouTubePublishHelper,
+} from '../../providers/personal-only/publish-helpers';
 
 const ALARM_MORNING_CAST = 'agentcast_scheduled_generation';
 const PATROL_GROUP_TITLE = 'agentCast 巡回中';
@@ -1101,10 +1106,89 @@ chrome.runtime.onMessage.addListener((message: RuntimeRequest, _sender, sendResp
       })();
       return true;
 
+    case 'START_PUBLISH_JOB':
+      void startPublishJob(message.job)
+        .then((tabId) => sendResponse({ ok: true, tabId }))
+        .catch((err: unknown) =>
+          sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) })
+        );
+      return true;
+
+    case 'GET_PENDING_PUBLISH_JOB':
+      sendResponse({ ok: true, job: pendingPublishJob });
+      return false;
+
+    case 'CLEAR_PENDING_PUBLISH_JOB':
+      pendingPublishJob = null;
+      sendResponse({ ok: true });
+      return false;
+
     default:
       return false;
   }
 });
+
+let pendingPublishJob: PendingPublishJob | null = null;
+
+async function startPublishJob(job: PendingPublishJob): Promise<number | undefined> {
+  pendingPublishJob = job;
+
+  const tab = await chrome.tabs.create({
+    url: job.targetUrl,
+    active: true,
+  });
+  const tabId = tab.id;
+  if (!tabId) return undefined;
+
+  const expectedHost =
+    job.platform === 'youtube' ? 'studio.youtube.com' : 'x.com';
+  const helperFn =
+    job.platform === 'youtube' ? injectYouTubePublishHelper : injectXPublishHelper;
+
+  const tryInject = async () => {
+    try {
+      const current = await chrome.tabs.get(tabId);
+      if (!current.url) return;
+      const host = new URL(current.url).hostname;
+      if (!host.includes(expectedHost) && !(job.platform === 'x' && host.includes('twitter.com'))) {
+        return;
+      }
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        func: helperFn,
+      });
+    } catch {
+      // Ignore transient redirect errors
+    }
+  };
+
+  const onUpdated = (updatedTabId: number, changeInfo: chrome.tabs.TabChangeInfo) => {
+    if (updatedTabId === tabId && changeInfo.status === 'complete') {
+      setTimeout(() => void tryInject(), 1100);
+    }
+  };
+
+  const cleanup = () => {
+    chrome.tabs.onUpdated.removeListener(onUpdated);
+    chrome.tabs.onRemoved.removeListener(onRemoved);
+  };
+
+  const onRemoved = (removedTabId: number) => {
+    if (removedTabId === tabId) cleanup();
+  };
+
+  chrome.tabs.onUpdated.addListener(onUpdated);
+  chrome.tabs.onRemoved.addListener(onRemoved);
+  setTimeout(cleanup, 10 * 60 * 1000);
+
+  void (async () => {
+    await waitForTabReady(tabId, 16000);
+    await sleep(1200);
+    await tryInject();
+  })();
+
+  return tabId;
+}
 
 async function startGeminiKeySetup(): Promise<number | undefined> {
   const tab = await chrome.tabs.create({

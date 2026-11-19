@@ -1,5 +1,6 @@
 import Dexie, { type Table } from 'dexie';
 import {
+  DEFAULT_PUBLISH_SETTINGS,
   DEFAULT_SETTINGS,
   type ExtractedCandidate,
   type ExtensionSettings,
@@ -49,6 +50,10 @@ export async function getSettings(): Promise<ExtensionSettings> {
         ...(saved?.enabledSources ?? {}),
       },
       customSites: Array.isArray(saved?.customSites) ? saved.customSites : [],
+      publish: {
+        ...DEFAULT_PUBLISH_SETTINGS,
+        ...(saved?.publish ?? {}),
+      },
     };
   }
   return { ...DEFAULT_SETTINGS };
@@ -66,6 +71,10 @@ export async function saveSettings(partial: Partial<ExtensionSettings>): Promise
     customSites: Array.isArray(partial.customSites)
       ? partial.customSites
       : current.customSites || [],
+    publish: {
+      ...current.publish,
+      ...(partial.publish ?? {}),
+    },
   };
   if (typeof chrome !== 'undefined' && chrome.storage?.local) {
     await chrome.storage.local.set({ [SETTINGS_STORAGE_KEY]: merged });

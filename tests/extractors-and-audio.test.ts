@@ -356,4 +356,31 @@ describe('Audio WAV Wrapping & Script JSON Parsing', () => {
     expect(atomItems[0].title).toBe('Atom Feed Release Note');
     expect(atomItems[0].url).toBe('https://example.dev/releases/v2');
   });
+
+  it('builds YouTube Studio upload URL, chaptered description, and X post payload', async () => {
+    const {
+      extractYouTubeChannelId,
+      buildYouTubeStudioUploadUrl,
+      buildYouTubeMetadata,
+      buildXPostPayload,
+    } = await import('../src/shared/publish-utils');
+
+    expect(
+      extractYouTubeChannelId('https://studio.youtube.com/channel/UC1234567890abcdefghij/videos')
+    ).toBe('UC1234567890abcdefghij');
+    expect(buildYouTubeStudioUploadUrl('UC1234567890abcdefghij')).toBe(
+      'https://studio.youtube.com/channel/UC1234567890abcdefghij/videos/upload?d=ud'
+    );
+    expect(buildYouTubeStudioUploadUrl('')).toBe('https://studio.youtube.com/?d=ud');
+
+    const demo = createDemoEpisode(DEFAULT_SETTINGS);
+    const yt = buildYouTubeMetadata(demo, DEFAULT_SETTINGS.publish);
+    expect(yt.title).toContain('サウンドチェック');
+    expect(yt.description).toContain('00:00 オープニング');
+    expect(yt.description).toContain('#agentCast');
+
+    const xPayload = buildXPostPayload(demo, DEFAULT_SETTINGS.publish);
+    expect(xPayload.postText.length).toBeLessThanOrEqual(140);
+    expect(xPayload.threadReplyText).toContain('https://zenn.dev/');
+  });
 });
