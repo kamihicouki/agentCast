@@ -410,19 +410,22 @@ async function listUserTabGroups(): Promise<TabGroupSummary[]> {
   return summaries;
 }
 
-async function patrolTabGroup(groupId: number): Promise<{
+async function patrolTabs(
+  tabs: chrome.tabs.Tab[],
+  progressLabel: string,
+  emptyError: string
+): Promise<{
   inserted: number;
   items: FeedItem[];
   warnings: string[];
 }> {
-  const tabs = await chrome.tabs.query({ groupId });
   const readableTabs = tabs.filter(
     (t): t is chrome.tabs.Tab & { id: number; url: string } =>
       Boolean(t.id && t.url && toOriginPattern(t.url))
   );
 
   if (readableTabs.length === 0) {
-    throw new Error('選択したタブグループに読み取り可能なWebページがありません。');
+    throw new Error(emptyError);
   }
 
   let totalInserted = 0;
@@ -432,7 +435,7 @@ async function patrolTabGroup(groupId: number): Promise<{
   for (let i = 0; i < readableTabs.length; i++) {
     const t = readableTabs[i];
     updateJobProgress(
-      `タブグループ巡回中 (${i + 1}/${readableTabs.length}): ${(t.title || t.url).slice(0, 28)}…`
+      `${progressLabel} (${i + 1}/${readableTabs.length}): ${(t.title || t.url).slice(0, 28)}…`
     );
 
     const extracted = await extractFromTab(t.id, 0);
@@ -448,6 +451,32 @@ async function patrolTabGroup(groupId: number): Promise<{
   }
 
   return { inserted: totalInserted, items: collectedItems, warnings };
+}
+
+async function patrolTabGroup(groupId: number): Promise<{
+  inserted: number;
+  items: FeedItem[];
+  warnings: string[];
+}> {
+  const tabs = await chrome.tabs.query({ groupId });
+  return patrolTabs(
+    tabs,
+    'タブグループ巡回中',
+    '選択したタブグループに読み取り可能なWebページがありません。'
+  );
+}
+
+async function patrolAllTabs(): Promise<{
+  inserted: number;
+  items: FeedItem[];
+  warnings: string[];
+}> {
+  const tabs = await chrome.tabs.query({ currentWindow: true });
+  return patrolTabs(
+    tabs,
+    '全タブ取り込み中',
+    '現在のウィンドウに読み取り可能なWebページがありません。'
+  );
 }
 
 interface DeepFetchTask {
@@ -1204,7 +1233,7 @@ async function playEpisodeInOffscreen(
 
 const dataOperations = new Set<RuntimeRequest['type']>([
   'PASSIVE_CANDIDATES', 'CAPTURE_ACTIVE_TAB', 'CAPTURE_AND_GENERATE_ACTIVE_TAB',
-  'LIST_TAB_GROUPS', 'PATROL_TAB_GROUP', 'PATROL_SOURCES', 'GENERATE_EPISODE_FROM_QUEUE',
+  'LIST_TAB_GROUPS', 'PATROL_TAB_GROUP', 'PATROL_ALL_TABS', 'PATROL_SOURCES', 'GENERATE_EPISODE_FROM_QUEUE',
   'PATROL_AND_GENERATE', 'UPDATE_SETTINGS', 'PATROL_CUSTOM_SITE', 'START_GEMINI_KEY_SETUP',
   'GEMINI_KEY_CAPTURED', 'VERIFY_GEMINI_KEY', 'START_PUBLISH_JOB', 'GET_PENDING_PUBLISH_JOB',
   'CLEAR_PENDING_PUBLISH_JOB', 'RADAR_CHECK', 'RADAR_IMPORT_YOUTUBE_SUBS',
@@ -1285,13 +1314,44 @@ function handleRequest(
         return false;
       }
       sendResponse({ ok: true, started: true });
-      void runBackgroundJob('選択したタブグループを巡回中...', async () => {
-        const res = await patrolTabGroup(message.groupId);
-        if (message.generateAfter !== false && res.items.length > 0) {
-          await generateEpisodeFromItems(res.items);
+      void runBackgroundJob(
+        message.generateAfter !== false
+          ? '選択したタブグループを取り込んで番組を作成中...'
+          : '選択したタブグループを巡回中...',
+        async () => {
+          const res = await patrolTabGroup(message.groupId);
+          if (message.generateAfter !== false) {
+            if (res.items.length === 0) {
+              throw new Error('選択したタブグループから読み取れる記事・情報が見つかりませんでした。');
+            }
+            await generateEpisodeFromItems(res.items);
+          }
+          return { warnings: res.warnings };
         }
-        return { warnings: res.warnings };
-      });
+      );
+      return false;
+
+    case 'PATROL_ALL_TABS':
+      if (isJobRunning) {
+        sendResponse({ ok: false, error: '現在別の巡回・番組生成が実行中です。' });
+        return false;
+      }
+      sendResponse({ ok: true, started: true });
+      void runBackgroundJob(
+        message.generateAfter
+          ? '開いている全タブを取り込んで番組を作成中...'
+          : '開いている全タブをキューへ取り込み中...',
+        async () => {
+          const res = await patrolAllTabs();
+          if (message.generateAfter) {
+            if (res.items.length === 0) {
+              throw new Error('開いているタブから読み取れる記事・情報が見つかりませんでした。');
+            }
+            await generateEpisodeFromItems(res.items);
+          }
+          return { warnings: res.warnings };
+        }
+      );
       return false;
 
     case 'PATROL_SOURCES':

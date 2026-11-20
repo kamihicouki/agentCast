@@ -29,6 +29,7 @@ export type RuntimeRequest =
   | { type: 'PATROL_CUSTOM_SITE'; siteId: string; generateAfter?: boolean }
   | { type: 'LIST_TAB_GROUPS' }
   | { type: 'PATROL_TAB_GROUP'; groupId: number; generateAfter?: boolean }
+  | { type: 'PATROL_ALL_TABS'; generateAfter?: boolean }
   | {
       type: 'GENERATE_EPISODE_FROM_QUEUE';
       itemIds?: string[];

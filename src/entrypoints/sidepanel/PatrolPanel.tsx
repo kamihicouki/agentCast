@@ -29,10 +29,12 @@ import { PatrolDepthControl } from './PatrolDepthControl';
 interface PatrolPanelProps {
   settings: ExtensionSettings;
   isJobRunning: boolean;
+  queueCount: number;
   tabGroups: TabGroupSummary[];
   selectedGroupId: number | '';
   onSelectGroupId: (id: number) => void;
   onRefreshTabGroups: () => Promise<void>;
+  onClearQueue: () => Promise<void>;
   onPatchSettings: (patch: Partial<ExtensionSettings>) => Promise<void>;
   onGoToQueue: () => void;
   showToast: (msg: string) => void;
@@ -43,6 +45,8 @@ type DetailTarget =
   | { kind: 'builtin'; sourceId: SourceId }
   | { kind: 'custom'; siteId: string }
   | null;
+
+type TabCaptureScope = 'active' | 'all' | 'group';
 
 const SOURCE_ICONS: Record<SourceId, string> = {
   youtube: '📺',
@@ -68,10 +72,12 @@ const EMPTY_SITE_DRAFT: Omit<CustomSiteConfig, 'id'> = {
 export function PatrolPanel({
   settings,
   isJobRunning,
+  queueCount,
   tabGroups,
   selectedGroupId,
   onSelectGroupId,
   onRefreshTabGroups,
+  onClearQueue,
   onPatchSettings,
   onGoToQueue,
   showToast,
@@ -85,6 +91,11 @@ export function PatrolPanel({
   const [focusVideoId, setFocusVideoId] = useState<string | null>(null);
   const [lastRadarAt, setLastRadarAt] = useState<string | undefined>();
 
+  // Tab capture scope & readable tab count in current window
+  const [tabScope, setTabScope] = useState<TabCaptureScope>('active');
+  const [allTabsCount, setAllTabsCount] = useState<number>(0);
+  const [confirmClearQueue, setConfirmClearQueue] = useState(false);
+
   // Add source drawer state
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [siteDraft, setSiteDraft] = useState<Omit<CustomSiteConfig, 'id'>>(EMPTY_SITE_DRAFT);
@@ -93,6 +104,43 @@ export function PatrolPanel({
   // Follow add input inside YouTube / X detail
   const [followInput, setFollowInput] = useState('');
   const [radarFilter, setRadarFilter] = useState<'all' | 'active' | 'quiet'>('all');
+
+  const refreshAllTabsCount = useCallback(async () => {
+    try {
+      const tabs = await chrome.tabs.query({ currentWindow: true });
+      const count = tabs.filter((t) => Boolean(t.id && t.url && toOriginPattern(t.url))).length;
+      setAllTabsCount(count);
+    } catch {
+      setAllTabsCount(0);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshAllTabsCount();
+    const onTabChanged = () => {
+      void refreshAllTabsCount();
+    };
+    chrome.tabs.onCreated?.addListener(onTabChanged);
+    chrome.tabs.onRemoved?.addListener(onTabChanged);
+    chrome.tabs.onUpdated?.addListener(onTabChanged);
+    return () => {
+      chrome.tabs.onCreated?.removeListener(onTabChanged);
+      chrome.tabs.onRemoved?.removeListener(onTabChanged);
+      chrome.tabs.onUpdated?.removeListener(onTabChanged);
+    };
+  }, [refreshAllTabsCount]);
+
+  useEffect(() => {
+    if (tabGroups.length === 0 && tabScope === 'group') {
+      setTabScope('active');
+    }
+  }, [tabGroups.length, tabScope]);
+
+  useEffect(() => {
+    if (queueCount === 0) {
+      setConfirmClearQueue(false);
+    }
+  }, [queueCount]);
 
   const reloadRadar = useCallback(async () => {
     const [ts, ds, stored] = await Promise.all([
@@ -819,6 +867,97 @@ export function PatrolPanel({
   }
 
   // ==================== MAIN FLAT SOURCE LIST VIEW ====================
+  const selectedGroup = tabGroups.find((g) => g.id === selectedGroupId) || tabGroups[0];
+  const isTabActionDisabled =
+    isJobRunning ||
+    (tabScope === 'all' && allTabsCount === 0) ||
+    (tabScope === 'group' && selectedGroupId === '');
+
+  const handleTabCapture = async (generateAfter: boolean) => {
+    setErrorBanner('');
+    if (tabScope === 'active') {
+      const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (active?.url && !(await ensureHostPermissionsForUrls([active.url]))) {
+        setErrorBanner('このページを読み取る権限が許可されませんでした。');
+        return;
+      }
+      if (generateAfter) {
+        void send(
+          { type: 'CAPTURE_AND_GENERATE_ACTIVE_TAB' },
+          '今のタブだけで番組を作成します'
+        );
+      } else {
+        const res = await send({ type: 'CAPTURE_ACTIVE_TAB' });
+        if (res?.ok) {
+          showToast(`今のタブから ${res.inserted} 件をキューに追加しました`);
+          onGoToQueue();
+        }
+      }
+      return;
+    }
+
+    if (tabScope === 'all') {
+      const windowTabs = await chrome.tabs.query({ currentWindow: true });
+      const urls = windowTabs
+        .map((t) => t.url)
+        .filter((u): u is string => Boolean(u && toOriginPattern(u)));
+      if (urls.length === 0) {
+        setErrorBanner('現在のウィンドウに読み取り可能なWebページがありません。');
+        return;
+      }
+      if (!(await ensureHostPermissionsForUrls(urls))) {
+        setErrorBanner('開いているタブを読み取る権限が許可されませんでした。');
+        return;
+      }
+      void send(
+        { type: 'PATROL_ALL_TABS', generateAfter },
+        generateAfter
+          ? `開いている全 ${urls.length} タブから番組を作成します`
+          : `開いている全 ${urls.length} タブの取り込みを開始しました`
+      );
+      return;
+    }
+
+    if (selectedGroupId === '') return;
+    const groupTabs = await chrome.tabs.query({ groupId: selectedGroupId });
+    const urls = groupTabs
+      .map((t) => t.url)
+      .filter((u): u is string => Boolean(u && toOriginPattern(u)));
+    if (!(await ensureHostPermissionsForUrls(urls))) {
+      setErrorBanner('タブグループ内のページを読み取る権限が許可されませんでした。');
+      return;
+    }
+    void send(
+      { type: 'PATROL_TAB_GROUP', groupId: selectedGroupId, generateAfter },
+      generateAfter
+        ? '選択したタブグループから番組を作成します'
+        : 'タブグループの巡回を開始しました'
+    );
+  };
+
+  const tabQueueLabel =
+    tabScope === 'active'
+      ? '＋ 今のタブを取り込む'
+      : tabScope === 'all'
+        ? `＋ 全${allTabsCount}タブを取り込む`
+        : `＋ ${selectedGroup ? `${selectedGroup.tabCount}タブ` : 'グループ'}を取り込む`;
+
+  const tabInstantLabel =
+    tabScope === 'active'
+      ? '⚡ 今のタブを即番組化'
+      : tabScope === 'all'
+        ? `⚡ 全${allTabsCount}タブを即番組化`
+        : `⚡ ${selectedGroup ? `${selectedGroup.tabCount}タブ` : 'グループ'}を即番組化`;
+
+  const tabScopeMeta =
+    tabScope === 'active'
+      ? '現在の1タブ'
+      : tabScope === 'all'
+        ? `現在のウィンドウ全 ${allTabsCount} タブ`
+        : selectedGroup
+          ? `グループ内 ${selectedGroup.tabCount} タブ`
+          : 'タブグループ';
+
   return (
     <section className="step-section" aria-label="STEP 2 巡回ソース">
       {/* [1] Step Header */}
@@ -827,7 +966,7 @@ export function PatrolPanel({
           <div className="step-kicker">STEP 2 / SOURCES &amp; PATROL</div>
           <h2 className="step-title">巡回ソース管理と収集実行</h2>
         </div>
-        <span className="mono-pill">
+        <span className={`mono-pill ${enabledSourceCount === 0 ? 'is-warn' : ''}`}>
           {enabledSourceCount}/{totalSourceCount} ON
         </span>
       </div>
@@ -841,60 +980,79 @@ export function PatrolPanel({
           )}
         </div>
         <p className="field-hint" style={{ marginTop: 4 }}>
-          有効なソースから最新情報だけを集め、自動で <strong>STEP 3 キュー</strong> に投入します。
+          {enabledSourceCount === 0 ? (
+            <>
+              巡回対象が <strong>0件</strong> です。下の一覧からソースを1つ以上ONにするか、下のタブ取り込みを使ってください。
+            </>
+          ) : (
+            <>
+              有効なソースから最新情報だけを集め、自動で <strong>STEP 3 キュー</strong> に追加します。
+            </>
+          )}
         </p>
         <button
           id="btn-patrol-to-queue"
           type="button"
           className="btn-primary"
           style={{ width: '100%', marginTop: 8 }}
-          disabled={isJobRunning}
+          disabled={isJobRunning || enabledSourceCount === 0}
           onClick={() => {
             void send({ type: 'PATROL_SOURCES' }, '巡回を開始しました。集まった素材はキューに入ります');
           }}
         >
-          ▶ 今すぐ巡回を実行してキューへ送る
+          {enabledSourceCount === 0
+            ? '巡回ソースを1つ以上ONにしてください'
+            : `▶ 選択中の ${enabledSourceCount} ソースを巡回してキューへ送る`}
         </button>
-        <div className="action-row-2" style={{ marginTop: 6 }}>
-          <button
-            type="button"
-            className="btn-secondary"
-            disabled={isJobRunning}
-            onClick={async () => {
-              const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
-              if (active?.url && !(await ensureHostPermissionsForUrls([active.url]))) {
-                setErrorBanner('このページを読み取る権限が許可されませんでした。');
-                return;
-              }
-              const res = await send({ type: 'CAPTURE_ACTIVE_TAB' });
-              if (res?.ok) {
-                showToast(`今のタブから ${res.inserted} 件をキューに追加しました`);
-                onGoToQueue();
-              }
-            }}
-          >
-            ＋ 今のタブを取り込む
-          </button>
-          <button
-            type="button"
-            className="btn-secondary"
-            disabled={isJobRunning}
-            onClick={async () => {
-              const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
-              if (active?.url && !(await ensureHostPermissionsForUrls([active.url]))) {
-                setErrorBanner('このページを読み取る権限が許可されませんでした。');
-                return;
-              }
-              void send(
-                { type: 'CAPTURE_AND_GENERATE_ACTIVE_TAB' },
-                '今のタブだけで番組を作成します'
-              );
-            }}
-          >
-            ⚡ 今のタブを即番組化
-          </button>
+
+        <div className="card-divider" />
+
+        {/* Unified Tab Capture Block (Active Tab / All Tabs / Tab Group) */}
+        <div className="tab-scope-header">
+          <span className="tab-scope-title">🌐 ブラウザのタブから直接取り込む</span>
+          <span className="tab-scope-meta">{tabScopeMeta}</span>
         </div>
-        {tabGroups.length > 0 && (
+
+        <div
+          className={`tab-scope-seg ${tabGroups.length === 0 ? 'is-2col' : ''}`}
+          role="tablist"
+          aria-label="取り込むタブの範囲"
+        >
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tabScope === 'active'}
+            className={`tab-scope-btn ${tabScope === 'active' ? 'is-active' : ''}`}
+            onClick={() => setTabScope('active')}
+          >
+            今のタブ
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tabScope === 'all'}
+            className={`tab-scope-btn ${tabScope === 'all' ? 'is-active' : ''}`}
+            onClick={() => {
+              setTabScope('all');
+              void refreshAllTabsCount();
+            }}
+          >
+            全タブ ({allTabsCount})
+          </button>
+          {tabGroups.length > 0 && (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={tabScope === 'group'}
+              className={`tab-scope-btn ${tabScope === 'group' ? 'is-active' : ''}`}
+              onClick={() => setTabScope('group')}
+            >
+              📁 グループ
+            </button>
+          )}
+        </div>
+
+        {tabScope === 'group' && tabGroups.length > 0 && (
           <div className="tabgroup-inline">
             <select
               className="field-select"
@@ -910,26 +1068,6 @@ export function PatrolPanel({
             </select>
             <button
               type="button"
-              className="btn-secondary"
-              disabled={isJobRunning || selectedGroupId === ''}
-              onClick={async () => {
-                if (selectedGroupId === '') return;
-                const groupTabs = await chrome.tabs.query({ groupId: selectedGroupId });
-                const urls = groupTabs.map((t) => t.url).filter((u): u is string => Boolean(u && toOriginPattern(u)));
-                if (!(await ensureHostPermissionsForUrls(urls))) {
-                  setErrorBanner('タブグループ内のページを読み取る権限が許可されませんでした。');
-                  return;
-                }
-                void send(
-                  { type: 'PATROL_TAB_GROUP', groupId: selectedGroupId, generateAfter: false },
-                  'タブグループの巡回を開始しました'
-                );
-              }}
-            >
-              キューへ
-            </button>
-            <button
-              type="button"
               className="btn-ghost"
               onClick={() => void onRefreshTabGroups()}
               title="タブグループ一覧を更新"
@@ -938,7 +1076,66 @@ export function PatrolPanel({
             </button>
           </div>
         )}
+
+        <div className="action-row-2" style={{ marginTop: 6 }}>
+          <button
+            type="button"
+            className="btn-secondary"
+            disabled={isTabActionDisabled}
+            onClick={() => void handleTabCapture(false)}
+          >
+            {tabQueueLabel}
+          </button>
+          <button
+            type="button"
+            className="btn-secondary is-instant"
+            disabled={isTabActionDisabled}
+            onClick={() => void handleTabCapture(true)}
+          >
+            {tabInstantLabel}
+          </button>
+        </div>
       </div>
+
+      {/* Queue Status & Clear Strip (visible when queue already has items) */}
+      {queueCount > 0 && (
+        <div className="queue-strip">
+          <span className="queue-strip-label">
+            現在のキュー: <strong>{queueCount}件</strong>
+          </span>
+          {confirmClearQueue ? (
+            <div className="queue-strip-actions">
+              <button
+                type="button"
+                className="btn-danger-solid btn-compact"
+                disabled={isJobRunning}
+                onClick={() => {
+                  setConfirmClearQueue(false);
+                  void onClearQueue();
+                }}
+              >
+                本当に空にする
+              </button>
+              <button
+                type="button"
+                className="btn-ghost"
+                onClick={() => setConfirmClearQueue(false)}
+              >
+                戻る
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              className="btn-danger-ghost btn-compact"
+              disabled={isJobRunning}
+              onClick={() => setConfirmClearQueue(true)}
+            >
+              🗑 キューを空にする
+            </button>
+          )}
+        </div>
+      )}
 
       {/* [3] Flat Unified Source List */}
       <div className="list-head-row">

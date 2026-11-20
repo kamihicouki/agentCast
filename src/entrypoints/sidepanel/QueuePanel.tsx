@@ -6,7 +6,6 @@ import {
   type FeedItem,
 } from '../../shared/types';
 import type { RuntimeRequest } from '../../shared/messages';
-import { ensureHostPermissionsForUrls } from '../../shared/permissions';
 
 interface QueuePanelProps {
   queue: FeedItem[];
@@ -37,11 +36,18 @@ export function QueuePanel({
     settings.durationMode || 'fixed'
   );
   const [excludedIds, setExcludedIds] = useState<Set<string>>(new Set());
+  const [confirmClear, setConfirmClear] = useState(false);
 
   useEffect(() => {
     setRunDurationMin(settings.targetDurationMin || 10);
     setRunDurationMode(settings.durationMode || 'fixed');
   }, [settings.targetDurationMin, settings.durationMode]);
+
+  useEffect(() => {
+    if (queue.length === 0) {
+      setConfirmClear(false);
+    }
+  }, [queue.length]);
 
   const selectedItems = useMemo(
     () => queue.filter((item) => !excludedIds.has(item.id)),
@@ -83,24 +89,6 @@ export function QueuePanel({
         );
         onGoToPlayer();
       }
-    } catch (err) {
-      setErrorBanner(err instanceof Error ? err.message : String(err));
-    }
-  };
-
-  const handleCaptureTab = async () => {
-    setErrorBanner('');
-    try {
-      const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (active?.url && !(await ensureHostPermissionsForUrls([active.url]))) {
-        setErrorBanner('このページを読み取る権限が許可されませんでした。');
-        return;
-      }
-      const res = await chrome.runtime.sendMessage({
-        type: 'CAPTURE_ACTIVE_TAB',
-      } satisfies RuntimeRequest);
-      if (!res?.ok) setErrorBanner(res?.error || '取り込みに失敗しました');
-      else showToast(`今のタブから ${res.inserted} 件をキューに追加しました`);
     } catch (err) {
       setErrorBanner(err instanceof Error ? err.message : String(err));
     }
@@ -196,37 +184,65 @@ export function QueuePanel({
           )}
         </div>
 
-        <button
-          id="btn-generate-from-queue"
-          type="button"
-          className="btn-primary"
-          style={{ width: '100%', marginTop: 10 }}
-          disabled={selectedItems.length === 0 || isJobRunning}
-          onClick={() => void handleGenerate()}
-        >
-          🎙 選択した {selectedItems.length} 件から番組を作成する
-        </button>
+        <div className="queue-compose-actions">
+          <button
+            id="btn-generate-from-queue"
+            type="button"
+            className="btn-primary"
+            style={{ width: '100%' }}
+            disabled={selectedItems.length === 0 || isJobRunning}
+            onClick={() => void handleGenerate()}
+          >
+            🎙 選択した {selectedItems.length} 件から番組を作成する
+          </button>
+
+          {queue.length > 0 && (
+            confirmClear ? (
+              <div className="clear-confirm-row">
+                <button
+                  type="button"
+                  className="btn-danger-solid"
+                  disabled={isJobRunning}
+                  onClick={() => {
+                    setConfirmClear(false);
+                    void onClearQueue();
+                  }}
+                >
+                  本当に全 {queue.length} 件をクリアする
+                </button>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => setConfirmClear(false)}
+                >
+                  キャンセル
+                </button>
+              </div>
+            ) : (
+              <button
+                id="btn-clear-queue"
+                type="button"
+                className="btn-danger-ghost"
+                style={{ width: '100%' }}
+                disabled={isJobRunning}
+                onClick={() => setConfirmClear(true)}
+              >
+                🗑 キューを全クリア（{queue.length}件）
+              </button>
+            )
+          )}
+        </div>
       </div>
 
       {/* [3] Queue Material List */}
       <div className="list-head-row">
         <span className="section-label">キュー内の素材（個別にON/OFF・除外）</span>
-        <div style={{ display: 'flex', gap: 6 }}>
-          <button type="button" className="btn-ghost is-accent" onClick={() => void handleCaptureTab()}>
-            ＋ 今のタブ
-          </button>
-          {queue.length > 0 && (
-            <button type="button" className="btn-ghost" onClick={() => void onClearQueue()}>
-              全クリア
-            </button>
-          )}
-        </div>
       </div>
 
       {queue.length === 0 ? (
         <div className="empty-box">
           <p>
-            未読キューは空です。<strong>STEP 2「巡回」</strong>で巡回を実行するか、「＋ 今のタブ」で記事を取り込んでください。
+            未読キューは空です。<strong>STEP 2「巡回」</strong>でソース巡回やタブ取り込みを実行してください。
           </p>
           <button
             type="button"

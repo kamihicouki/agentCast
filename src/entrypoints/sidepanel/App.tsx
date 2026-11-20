@@ -800,10 +800,12 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
           <PatrolPanel
             settings={settings}
             isJobRunning={isJobRunning}
+            queueCount={queue.length}
             tabGroups={tabGroups}
             selectedGroupId={selectedGroupId}
             onSelectGroupId={(id) => setSelectedGroupId(id)}
             onRefreshTabGroups={refreshTabGroups}
+            onClearQueue={handleClearQueue}
             onPatchSettings={handlePatchSettings}
             onGoToQueue={() => setTab('queue')}
             showToast={showToast}

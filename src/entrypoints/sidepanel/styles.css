@@ -346,6 +346,8 @@ a:hover {
   color: var(--text-secondary);
   padding: 4px 6px;
   font-size: 11.5px;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .btn-ghost:hover:not(:disabled) {
@@ -1493,3 +1495,164 @@ input[type='checkbox'] {
   background: rgba(255, 190, 61, 0.14);
   border-color: rgba(255, 190, 61, 0.36);
 }
+
+/* ==================== TAB CAPTURE SCOPE & QUEUE CLEAR ==================== */
+.mono-pill.is-warn {
+  color: var(--accent-amber);
+  border-color: rgba(255, 190, 61, 0.35);
+  background: rgba(255, 190, 61, 0.08);
+}
+
+.card-divider {
+  height: 1px;
+  background: var(--line-subtle);
+  margin: 10px 0 8px;
+}
+
+.tab-scope-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.tab-scope-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-secondary);
+}
+
+.tab-scope-meta {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.tab-scope-seg {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 3px;
+  background: var(--bg-input);
+  border: 1px solid var(--line-subtle);
+  border-radius: 9px;
+  padding: 3px;
+}
+
+.tab-scope-seg.is-2col {
+  grid-template-columns: repeat(2, 1fr);
+}
+
+.tab-scope-btn {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 5px 4px;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 130ms ease, color 130ms ease, border-color 130ms ease;
+}
+
+.tab-scope-btn:hover {
+  color: var(--text-primary);
+}
+
+.tab-scope-btn.is-active {
+  background: rgba(0, 184, 255, 0.18);
+  color: #ffffff;
+  border-color: var(--line-strong);
+}
+
+.btn-secondary.is-instant {
+  border-color: rgba(255, 190, 61, 0.28);
+}
+
+.btn-secondary.is-instant:hover:not(:disabled) {
+  border-color: rgba(255, 190, 61, 0.55);
+  background: rgba(255, 190, 61, 0.08);
+}
+
+.btn-danger-ghost,
+.btn-danger-solid {
+  appearance: none;
+  font-family: inherit;
+  font-size: 11.5px;
+  font-weight: 700;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  padding: 7px 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.btn-danger-ghost {
+  border: 1px solid rgba(255, 92, 108, 0.32);
+  background: rgba(255, 92, 108, 0.1);
+  color: #ff8c97;
+}
+
+.btn-danger-ghost:hover:not(:disabled) {
+  background: rgba(255, 92, 108, 0.2);
+  border-color: rgba(255, 92, 108, 0.58);
+  color: #ffd5da;
+}
+
+.btn-danger-solid {
+  border: 1px solid rgba(255, 92, 108, 0.7);
+  background: #d93b4f;
+  color: #ffffff;
+}
+
+.btn-danger-solid:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.queue-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  border: 1px solid var(--line-subtle);
+  font-size: 11.5px;
+}
+
+.queue-strip-label {
+  color: var(--text-secondary);
+}
+
+.queue-strip-label strong {
+  color: var(--text-primary);
+}
+
+.queue-strip-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.queue-compose-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.clear-confirm-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px;
+}
+
