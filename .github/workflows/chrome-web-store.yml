@@ -91,8 +91,7 @@ jobs:
             gh release edit "$tag" --draft=false --repo "$GITHUB_REPOSITORY"
             exit 0
           fi
-          existing_tag=$(git ls-remote "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "refs/tags/$tag")
-          if [[ -z "$existing_tag" ]]; then
+          if ! gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" >/dev/null 2>&1; then
             gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
               -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA" >/dev/null
           fi
