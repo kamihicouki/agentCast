@@ -192,3 +192,65 @@ describe('Video digest parsing', () => {
     expect(d.verdict).toBe('watch');
   });
 });
+
+import {
+  buildPodcastScriptPrompt,
+  filterFreshAndUniqueItems,
+  type RecentTopicDigest,
+} from '../src/providers/prompt-builder';
+import { DEFAULT_SETTINGS, type FeedItem } from '../src/shared/types';
+
+function makeFeedItem(partial: Partial<FeedItem> & { id: string; url: string }): FeedItem {
+  return {
+    source: 'zenn',
+    canonicalUrl: partial.url,
+    title: partial.title || 'Sample Title',
+    author: 'Tester',
+    content: 'テスト本文コンテンツです。新機能の詳細について解説しています。',
+    excerpt: 'テスト本文',
+    outboundUrls: [],
+    publishedAt: '2026-11-19T10:00:00Z',
+    capturedAt: '2026-11-19T11:50:00Z',
+    engagementScore: 1,
+    consumedInEpisodeId: null,
+    ...partial,
+  };
+}
+
+describe('Script freshness & deduplication', () => {
+  const recent: RecentTopicDigest[] = [
+    {
+      episodeTitle: '前回のAIニュース回',
+      createdAt: '2026-11-18T08:00:00Z',
+      chapters: [{ title: 'Gemini 3.8 リリース', summary: '新TTSモデルが発表された。' }],
+      coveredUrls: ['https://example.com/already-covered'],
+    },
+  ];
+
+  it('drops stale items (>72h) and previously covered URLs, while keeping fresh ones', () => {
+    const fresh = makeFeedItem({ id: 'fresh-1', url: 'https://example.com/fresh', publishedAt: '2026-11-19T06:00:00Z' });
+    const stale = makeFeedItem({ id: 'stale-1', url: 'https://example.com/old', publishedAt: '2026-11-10T06:00:00Z' });
+    const dup = makeFeedItem({ id: 'dup-1', url: 'https://example.com/already-covered', publishedAt: '2026-11-19T09:00:00Z' });
+
+    const res = filterFreshAndUniqueItems([stale, dup, fresh], recent, { now: NOW, maxAgeHours: 72 });
+    expect(res.kept.map((i) => i.id)).toEqual(['fresh-1']);
+    expect(res.droppedStaleIds).toEqual(['stale-1']);
+    expect(res.droppedDupIds).toEqual(['dup-1']);
+  });
+
+  it('keeps explicit tab items even when older than the freshness window', () => {
+    const oldExplicit = makeFeedItem({ id: 'exp-1', url: 'https://example.com/old-doc', publishedAt: '2026-10-01T00:00:00Z' });
+    const res = filterFreshAndUniqueItems([oldExplicit], recent, { now: NOW, enforceFreshness: false });
+    expect(res.kept.map((i) => i.id)).toEqual(['exp-1']);
+  });
+
+  it('includes timestamps, recent episode topics, and update-allowed guidance in the prompt', () => {
+    const fresh = makeFeedItem({ id: 'fresh-1', url: 'https://example.com/fresh', publishedAt: '2026-11-19T09:00:00Z' });
+    const prompt = buildPodcastScriptPrompt([fresh], DEFAULT_SETTINGS, { now: NOW, recentTopics: recent });
+    expect(prompt).toContain('現在日時:');
+    expect(prompt).toContain('3時間前');
+    expect(prompt).toContain('過去の番組で既に扱ったトピック');
+    expect(prompt).toContain('Gemini 3.8 リリース');
+    expect(prompt).toContain('前回からの差分');
+  });
+});

@@ -4,11 +4,16 @@ import type {
   FeedItem,
 } from '../shared/types';
 import { ensurePlayableAudioBlob } from '../shared/wav-utils';
-import { buildPodcastScriptPrompt, parseGeneratedScriptJson } from './prompt-builder';
+import {
+  buildPodcastScriptPrompt,
+  parseGeneratedScriptJson,
+  type ScriptPromptOptions,
+} from './prompt-builder';
 
 export async function generateScriptWithOpenAI(
   items: FeedItem[],
-  settings: ExtensionSettings
+  settings: ExtensionSettings,
+  promptOpts?: ScriptPromptOptions
 ): Promise<{ title: string; subtitle: string; chapters: EpisodeChapter[] }> {
   const apiKey = settings.openaiApiKey.trim();
   if (!apiKey) {
@@ -18,7 +23,7 @@ export async function generateScriptWithOpenAI(
   }
 
   const model = settings.openaiModel.trim() || 'gpt-4o-mini';
-  const prompt = buildPodcastScriptPrompt(items, settings);
+  const prompt = buildPodcastScriptPrompt(items, settings, promptOpts);
 
   const response = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',

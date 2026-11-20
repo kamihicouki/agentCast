@@ -28,7 +28,11 @@ import type {
 } from '../../shared/messages';
 import { parseZennRssXml } from '../../extractors/zenn';
 import { parseGenericRssOrAtomXml } from '../../extractors/custom-site';
-import { createDemoEpisode } from '../../providers/prompt-builder';
+import {
+  createDemoEpisode,
+  filterFreshAndUniqueItems,
+  type RecentTopicDigest,
+} from '../../providers/prompt-builder';
 import {
   generateScriptWithGemini,
   synthesizeChapterWithGeminiTts,
@@ -683,29 +687,76 @@ function getProviderLabels(settings: ExtensionSettings): {
   };
 }
 
+async function loadRecentTopicDigests(limit = 8, maxDays = 7): Promise<RecentTopicDigest[]> {
+  const cutoff = Date.now() - maxDays * 86_400_000;
+  const recentEps = await db.episodes.orderBy('createdAt').reverse().limit(20).toArray();
+  return recentEps
+    .filter(
+      (ep) =>
+        ep.status === 'ready' &&
+        !ep.id.startsWith('demo-') &&
+        (Date.parse(ep.createdAt) || 0) >= cutoff &&
+        ep.chapters.length > 0
+    )
+    .slice(0, limit)
+    .map((ep) => ({
+      episodeTitle: ep.title,
+      createdAt: ep.createdAt,
+      chapters: ep.chapters.map((c) => ({ title: c.title, summary: c.summary })),
+      coveredUrls: ep.chapters.flatMap((c) => c.sourceItems.map((s) => s.url)),
+    }));
+}
+
 async function generateEpisodeFromItems(
   explicitItems?: FeedItem[]
 ): Promise<PodcastEpisode> {
   const settings = await getSettings();
-  const queueItems =
-    explicitItems && explicitItems.length > 0
-      ? explicitItems
-      : await getUnreadQueue(settings.maxItemsPerPatrol || 24);
+  const isExplicit = Boolean(explicitItems && explicitItems.length > 0);
+  const rawQueueItems = isExplicit
+    ? explicitItems!
+    : await getUnreadQueue((settings.maxItemsPerPatrol || 24) + 16);
 
-  if (queueItems.length === 0) {
+  if (rawQueueItems.length === 0) {
     throw new Error(
       '未読キューが空です。「巡回して番組作成」または「＋ 今のタブ」を実行してください。'
     );
   }
 
-  const episodeId = `ep-${Date.now()}`;
-  const nowIso = new Date().toISOString();
+  const now = Date.now();
+  const recentTopics = await loadRecentTopicDigests(8, 7);
+  const filtered = filterFreshAndUniqueItems(rawQueueItems, recentTopics, {
+    now,
+    maxAgeHours: settings.radarWindowHours || 72,
+    enforceFreshness: !isExplicit,
+  });
+
+  // Mark dropped stale/duplicate queue items so they don't clog future patrols
+  if (filtered.droppedStaleIds.length > 0) {
+    await markItemsConsumed(filtered.droppedStaleIds, 'skipped-stale');
+  }
+  if (filtered.droppedDupIds.length > 0) {
+    await markItemsConsumed(filtered.droppedDupIds, 'skipped-duplicate');
+  }
+  if (filtered.droppedStaleIds.length > 0 || filtered.droppedDupIds.length > 0) {
+    broadcastEvent({ type: 'QUEUE_UPDATED' });
+  }
+
+  const queueItems = filtered.kept.slice(0, settings.maxItemsPerPatrol || 24);
+  if (queueItems.length === 0) {
+    throw new Error(
+      '過去番組と重複していない最新アイテムがありませんでした。新しく巡回してからお試しください。'
+    );
+  }
+
+  const episodeId = `ep-${now}`;
+  const nowIso = new Date(now).toISOString();
   const labels = getProviderLabels(settings);
+  const promptOpts = { now, recentTopics };
 
   const placeholder: PodcastEpisode = {
     id: episodeId,
     title: '番組台本を構成中...',
-    subtitle: `${queueItems.length}件の新着記事・SNSポストを整理しています`,
+    subtitle: `${queueItems.length}件の最新記事・SNSポストを整理しています`,
     createdAt: nowIso,
     updatedAt: nowIso,
     status: 'generating_script',
@@ -725,13 +776,13 @@ async function generateEpisodeFromItems(
     let generated: { title: string; subtitle: string; chapters: PodcastEpisode['chapters'] };
 
     if (settings.aiMode === 'gemini_api') {
-      generated = await generateScriptWithGemini(queueItems, settings);
+      generated = await generateScriptWithGemini(queueItems, settings, promptOpts);
     } else if (settings.aiMode === 'openai_api') {
-      generated = await generateScriptWithOpenAI(queueItems, settings);
+      generated = await generateScriptWithOpenAI(queueItems, settings, promptOpts);
     } else if (settings.aiMode === 'web_chatgpt') {
-      generated = await generateScriptViaWebSession('chatgpt', queueItems, settings);
+      generated = await generateScriptViaWebSession('chatgpt', queueItems, settings, promptOpts);
     } else {
-      generated = await generateScriptViaWebSession('gemini', queueItems, settings);
+      generated = await generateScriptViaWebSession('gemini', queueItems, settings, promptOpts);
     }
 
     let effectiveTts = settings.ttsMode;

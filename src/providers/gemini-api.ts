@@ -4,13 +4,18 @@ import type {
   FeedItem,
 } from '../shared/types';
 import { base64ToUint8Array, ensurePlayableAudioBlob } from '../shared/wav-utils';
-import { buildPodcastScriptPrompt, parseGeneratedScriptJson } from './prompt-builder';
+import {
+  buildPodcastScriptPrompt,
+  parseGeneratedScriptJson,
+  type ScriptPromptOptions,
+} from './prompt-builder';
 
 const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
 export async function generateScriptWithGemini(
   items: FeedItem[],
-  settings: ExtensionSettings
+  settings: ExtensionSettings,
+  promptOpts?: ScriptPromptOptions
 ): Promise<{ title: string; subtitle: string; chapters: EpisodeChapter[] }> {
   const apiKey = settings.geminiApiKey.trim();
   if (!apiKey) {
@@ -20,7 +25,7 @@ export async function generateScriptWithGemini(
   }
 
   const model = settings.geminiModel.trim() || 'gemini-flash-latest';
-  const prompt = buildPodcastScriptPrompt(items, settings);
+  const prompt = buildPodcastScriptPrompt(items, settings, promptOpts);
 
   const response = await fetch(`${GEMINI_API_BASE}/${encodeURIComponent(model)}:generateContent`, {
     method: 'POST',

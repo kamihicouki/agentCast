@@ -3,7 +3,11 @@ import type {
   ExtensionSettings,
   FeedItem,
 } from '../../shared/types';
-import { buildPodcastScriptPrompt, parseGeneratedScriptJson } from '../prompt-builder';
+import {
+  buildPodcastScriptPrompt,
+  parseGeneratedScriptJson,
+  type ScriptPromptOptions,
+} from '../prompt-builder';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -191,9 +195,10 @@ export async function runPromptViaWebSession(
 export async function generateScriptViaWebSession(
   provider: 'chatgpt' | 'gemini',
   items: FeedItem[],
-  settings: ExtensionSettings
+  settings: ExtensionSettings,
+  promptOpts?: ScriptPromptOptions
 ): Promise<{ title: string; subtitle: string; chapters: EpisodeChapter[] }> {
-  const prompt = buildPodcastScriptPrompt(items, settings);
+  const prompt = buildPodcastScriptPrompt(items, settings, promptOpts);
   const responseText = await runPromptViaWebSession(provider, prompt);
   return parseGeneratedScriptJson(responseText, items, settings);
 }

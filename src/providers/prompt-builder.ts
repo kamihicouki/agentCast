@@ -23,10 +23,131 @@ export interface RawGeneratedScript {
   }>;
 }
 
+export interface RecentTopicDigest {
+  episodeTitle: string;
+  createdAt: string;
+  chapters: { title: string; summary: string }[];
+  coveredUrls: string[];
+}
+
+export interface ScriptPromptOptions {
+  now?: number;
+  recentTopics?: RecentTopicDigest[];
+}
+
+function formatAgeJa(iso: string | undefined, now: number): string {
+  if (!iso) return '日時不明';
+  const ts = Date.parse(iso);
+  if (!Number.isFinite(ts)) return '日時不明';
+  const diffMs = Math.max(0, now - ts);
+  const mins = Math.floor(diffMs / 60_000);
+  if (mins < 60) return `${Math.max(1, mins)}分前`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}時間前`;
+  const days = Math.floor(hours / 24);
+  return `${days}日前`;
+}
+
+function formatJstTimestamp(ms: number): string {
+  const d = new Date(ms);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  return `${y}/${m}/${day} ${hh}:${mm}`;
+}
+
+/**
+ * Filters out stale items (older than maxAgeHours) and URLs already covered in recent episodes.
+ * Skipped when `enforceFreshness` is false (e.g., user explicitly asked to turn the active tab into a podcast).
+ */
+export function filterFreshAndUniqueItems(
+  items: FeedItem[],
+  recentTopics: RecentTopicDigest[],
+  opts: { now?: number; maxAgeHours?: number; enforceFreshness?: boolean } = {}
+): { kept: FeedItem[]; droppedStaleIds: string[]; droppedDupIds: string[] } {
+  const now = opts.now ?? Date.now();
+  const maxAgeMs = (opts.maxAgeHours ?? 72) * 3_600_000;
+  const enforce = opts.enforceFreshness ?? true;
+
+  if (!enforce) {
+    return { kept: items, droppedStaleIds: [], droppedDupIds: [] };
+  }
+
+  const coveredUrls = new Set<string>();
+  for (const ep of recentTopics) {
+    for (const u of ep.coveredUrls) {
+      if (u) coveredUrls.add(u);
+    }
+  }
+
+  const kept: FeedItem[] = [];
+  const droppedStaleIds: string[] = [];
+  const droppedDupIds: string[] = [];
+
+  for (const item of items) {
+    // Always keep synthetic radar summaries
+    if (item.url.startsWith('https://agentcast.local/')) {
+      kept.push(item);
+      continue;
+    }
+
+    if (coveredUrls.has(item.canonicalUrl) || coveredUrls.has(item.url)) {
+      droppedDupIds.push(item.id);
+      continue;
+    }
+
+    const pubTs = Date.parse(item.publishedAt || '');
+    const capTs = Date.parse(item.capturedAt || '');
+    // Only treat publishedAt as a true publication date if it parses and isn't just the capture fallback
+    const hasReliablePubDate = Number.isFinite(pubTs) && (!Number.isFinite(capTs) || Math.abs(capTs - pubTs) > 5_000);
+    if (hasReliablePubDate && now - pubTs > maxAgeMs) {
+      droppedStaleIds.push(item.id);
+      continue;
+    }
+
+    kept.push(item);
+  }
+
+  // Sort freshest first so top-28 serialization prioritizes newest info
+  kept.sort((a, b) => {
+    const aRadar = a.url.startsWith('https://agentcast.local/') ? 1 : 0;
+    const bRadar = b.url.startsWith('https://agentcast.local/') ? 1 : 0;
+    if (aRadar !== bRadar) return bRadar - aRadar;
+    const ta = Date.parse(a.publishedAt || a.capturedAt || '') || 0;
+    const tb = Date.parse(b.publishedAt || b.capturedAt || '') || 0;
+    return tb - ta;
+  });
+
+  // Safety valve: if everything in queue was older than maxAgeHours, keep the 5 newest non-duplicate items
+  if (kept.length === 0 && items.length > 0) {
+    const fallback = items
+      .filter((i) => !droppedDupIds.includes(i.id))
+      .sort(
+        (a, b) =>
+          (Date.parse(b.publishedAt || b.capturedAt || '') || 0) -
+          (Date.parse(a.publishedAt || a.capturedAt || '') || 0)
+      )
+      .slice(0, 5);
+    const fallbackIds = new Set(fallback.map((i) => i.id));
+    return {
+      kept: fallback,
+      droppedStaleIds: droppedStaleIds.filter((id) => !fallbackIds.has(id)),
+      droppedDupIds,
+    };
+  }
+
+  return { kept, droppedStaleIds, droppedDupIds };
+}
+
 export function buildPodcastScriptPrompt(
   items: FeedItem[],
-  settings: ExtensionSettings
+  settings: ExtensionSettings,
+  options: ScriptPromptOptions = {}
 ): string {
+  const now = options.now ?? Date.now();
+  const recentTopics = options.recentTopics ?? [];
   const targetChapters =
     settings.targetDurationMin <= 5 ? '2〜3個' : settings.targetDurationMin <= 10 ? '4〜5個' : '6〜7個';
   const turnsPerChapter =
@@ -37,7 +158,13 @@ export function buildPodcastScriptPrompt(
     .map((item, idx) => {
       const sourceLabel = SOURCE_META[item.source]?.shortLabel || item.source;
       const bodySnippet = item.content.slice(0, 900);
-      return `[ID: ${item.id}] (#${idx + 1} / ${sourceLabel} / 著者: ${item.author})
+      const pubTs = Date.parse(item.publishedAt || '');
+      const capTs = Date.parse(item.capturedAt || '');
+      const isCaptureFallback = Number.isFinite(pubTs) && Number.isFinite(capTs) && Math.abs(capTs - pubTs) <= 5_000;
+      const dateLabel = Number.isFinite(pubTs)
+        ? `${formatJstTimestamp(pubTs)}（${formatAgeJa(item.publishedAt, now)}${isCaptureFallback ? '・取得時刻' : ''}）`
+        : '日時不明';
+      return `[ID: ${item.id}] (#${idx + 1} / ${sourceLabel} / 著者: ${item.author} / 日時: ${dateLabel})
 タイトル: ${item.title}
 URL: ${item.url}
 本文抜粋:
@@ -45,7 +172,25 @@ ${bodySnippet}`;
     })
     .join('\n\n---\n\n');
 
+  const recentSection =
+    recentTopics.length > 0
+      ? `\n\n## 過去の番組で既に扱ったトピック（直近${recentTopics.length}回・重複回避用）\n` +
+        recentTopics
+          .slice(0, 8)
+          .map((ep) => {
+            const epDate = formatJstTimestamp(Date.parse(ep.createdAt) || now);
+            const chLines = ep.chapters
+              .filter((c) => c.title && !/^(オープニング|導入|エンディング|まとめ)[:：]?$/i.test(c.title))
+              .slice(0, 6)
+              .map((c) => `  - ${c.title}${c.summary ? `：${c.summary.slice(0, 80)}` : ''}`)
+              .join('\n');
+            return `- [${epDate}] ${ep.episodeTitle}\n${chLines}`;
+          })
+          .join('\n')
+      : '';
+
   return `あなたは日本の人気テクノロジー＆ニュース解説ポッドキャスト番組の構成作家です。
+現在日時: ${formatJstTimestamp(now)}
 以下の「ユーザーのフォロー中SNS・購読サイトから集めた未読アイテム一覧」をもとに、2人のパーソナリティ（HostA: ${settings.hostAName}、HostB: ${settings.hostBName}）が自然で知的な掛け合いを行うラジオ番組台本をJSON形式で作成してください。
 
 ## パーソナリティ設定
@@ -54,12 +199,14 @@ ${bodySnippet}`;
 - 重視する関心テーマ: ${settings.focusTopics}
 
 ## 番組構成ルール
-1. 同じニュースや関連する話題（例：Yahoo!/Googleニュースの報道とXでの反応、ZennとNoteの類似技術テーマ、同一プロダクトの複数リリースノート）は分かりやすくチャプターに整理・統合し、多角的に紹介してください。
-2. **タイトルとサブタイトルの差別化（重要）**：毎回同じ「○月○日 午後のテック＆トレンドダイジェスト」のような汎用タイトルは使わず、**その回の中心トピック・固有名詞を含めた一目で区別できるタイトル**にしてください。また \`subtitle\` には収集内容を解析した**主要トピック2〜3件の要点サマリー（45〜70文字程度）**を必ず入れてください。
-3. 英語の記事やリリースノート（Changelog等）が含まれる場合は、**必ず自然な日本語で噛み砕いて解説**してください。バージョン番号やスラッシュコマンド（例: v2.33.0 → バージョン2.33.0、/swarm → スウォームコマンド、SSH → エスエスエイチ）は \`spokenText\` で滑らかに発音できる表記にしてください。
-4. 全体で ${targetChapters} のトピックチャプター（先頭の短いオープニング挨拶を含む）に編成し、各チャプターは ${turnsPerChapter} のテンポ良い会話にしてください。
-5. 音声合成（TTS）で読み上げた際に不自然にならないよう、URL文字列や絵文字はセリフに含めず、難読英単語・略語（例: Vite→ヴィート、PR→プルリクエスト、LLM→エルエルエム）を自然に読める日本語表記を \`spokenText\` に入れてください（通常の字幕表示用は \`text\`）。
-6. 出力は**必ず以下のJSONスキーマのみ**（Markdownのコードブロック装飾や前置き文なし）で返してください。
+1. **情報鮮度の確認（重要）**：各アイテムの「日時」および本文中の日付を確認し、現在日時（${formatJstTimestamp(now)}）に近い最新のニュース・リリース・動画を優先して取り上げてください。数日以上前の古い記事や過去の話題の単なる再掲は原則スキップし、どうしても触れる場合も最新ニュースの背景補足にとどめてください。
+2. **過去番組との重複回避と続報の扱い（重要）**：下部の「過去の番組で既に扱ったトピック」と同じニュース・同じ主張の繰り返しは**採用しないでください**。ただし、**同じニュースに対する新しい発表・続報・アップデート・バージョン更新・反響の変化など「前回からの差分」がある場合**は積極的に取り上げ、「以前お伝えした〇〇の続報ですが〜」のように前回からの変化点を明確に語ってください。
+3. 同じニュースや関連する話題（例：Yahoo!/Googleニュースの報道とXでの反応、ZennとNoteの類似技術テーマ、同一プロダクトの複数リリースノート）は分かりやすくチャプターに整理・統合し、多角的に紹介してください。
+4. **タイトルとサブタイトルの差別化（重要）**：毎回同じ「○月○日 午後のテック＆トレンドダイジェスト」のような汎用タイトルは使わず、**その回の中心トピック・固有名詞を含めた一目で区別できるタイトル**にしてください。また \`subtitle\` には収集内容を解析した**主要トピック2〜3件の要点サマリー（45〜70文字程度）**を必ず入れてください。
+5. 英語の記事やリリースノート（Changelog等）が含まれる場合は、**必ず自然な日本語で噛み砕いて解説**してください。バージョン番号やスラッシュコマンド（例: v2.33.0 → バージョン2.33.0、/swarm → スウォームコマンド、SSH → エスエスエイチ）は \`spokenText\` で滑らかに発音できる表記にしてください。
+6. 全体で ${targetChapters} のトピックチャプター（先頭の短いオープニング挨拶を含む）に編成し、各チャプターは ${turnsPerChapter} のテンポ良い会話にしてください。
+7. 音声合成（TTS）で読み上げた際に不自然にならないよう、URL文字列や絵文字はセリフに含めず、難読英単語・略語（例: Vite→ヴィート、PR→プルリクエスト、LLM→エルエルエム）を自然に読める日本語表記を \`spokenText\` に入れてください（通常の字幕表示用は \`text\`）。
+8. 出力は**必ず以下のJSONスキーマのみ**（Markdownのコードブロック装飾や前置き文なし）で返してください。
 
 {
   "title": "内容が一目で分かる固有の番組タイトル（例：LINE Dev Community移行＆Gemini 4 Neon解説）",
@@ -78,7 +225,7 @@ ${bodySnippet}`;
       ]
     }
   ]
-}
+}${recentSection}
 
 ## 収集アイテム一覧
 ${serializedItems}`;
