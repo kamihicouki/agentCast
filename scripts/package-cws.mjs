@@ -30,6 +30,13 @@ if (manifest.manifest_version !== 3) throw new Error('manifest_version must be 3
 if (manifest.host_permissions?.includes('<all_urls>')) {
   throw new Error('CWS build must not request <all_urls> in host_permissions');
 }
+if (manifest.permissions?.includes('activeTab')) {
+  throw new Error('CWS tab capture must use opt-in HTTPS host permissions');
+}
+if (manifest.optional_host_permissions?.length !== 1 ||
+    manifest.optional_host_permissions[0] !== 'https://*/*') {
+  throw new Error('CWS optional host permissions must be HTTPS-only');
+}
 if (manifest.web_accessible_resources?.length) {
   throw new Error('CWS build must not expose dev build-meta.json in web_accessible_resources');
 }

@@ -5,8 +5,9 @@ import type {
   RuntimeRequest,
 } from '../../shared/messages';
 import type { ExtensionSettings } from '../../shared/types';
+import { DATA_CONSENT_KEY, DATA_CONSENT_REQUIRED, hasCurrentDataConsent, hasDataConsent, SETTINGS_STORAGE_KEY } from '../../shared/data-consent';
+import { matchesPassiveSite, toOriginPattern } from '../../shared/permissions';
 
-const SETTINGS_STORAGE_KEY = 'agentcast_settings_v1';
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export function isPassiveCaptureEnabledInStorage(stored: unknown): boolean {
@@ -18,6 +19,9 @@ async function gentleScrollAndExtract(
   scrollSteps = 0,
   customRule?: CustomExtractRule
 ): Promise<ExtractionResultPayload> {
+  if (!(await hasDataConsent()) || (DATA_CONSENT_REQUIRED && !toOriginPattern(window.location.href))) {
+    return { blocked: true, candidates: [] };
+  }
   const firstPass = extractFromDocument(document, window.location.href, customRule);
   if (firstPass.blocked || scrollSteps <= 0) {
     return firstPass;
@@ -31,6 +35,7 @@ async function gentleScrollAndExtract(
     window.scrollBy({ top: Math.round(window.innerHeight * 0.82), behavior: 'smooth' });
     await sleep(jitter);
 
+    if (!(await hasDataConsent())) return { blocked: true, candidates: [] };
     const pass = extractFromDocument(document, window.location.href, customRule);
     if (pass.blocked) {
       return pass;
@@ -126,23 +131,27 @@ if (typeof window !== 'undefined' && typeof chrome !== 'undefined' && chrome.run
   };
 
   if (chrome.storage?.local) {
-    chrome.storage.local
-      .get(SETTINGS_STORAGE_KEY)
-      .then((res) => {
-        if (isPassiveCaptureEnabledInStorage(res?.[SETTINGS_STORAGE_KEY])) {
+    let revision = 0;
+    const syncPassiveCapture = async () => {
+      const current = ++revision;
+      disablePassiveCapture();
+      try {
+        const res = await chrome.storage.local.get([SETTINGS_STORAGE_KEY, DATA_CONSENT_KEY]);
+        const settings = res[SETTINGS_STORAGE_KEY] as Partial<ExtensionSettings> | undefined;
+        if (current === revision && hasCurrentDataConsent(res[DATA_CONSENT_KEY]) &&
+            isPassiveCaptureEnabledInStorage(settings) &&
+            (!DATA_CONSENT_REQUIRED || matchesPassiveSite(window.location.href, settings?.customSites))) {
           enablePassiveCapture();
         }
-      })
-      .catch(() => {
-        // Default OFF on storage read error
-      });
+      } catch {
+        // Default OFF on storage read error.
+      }
+    };
+    void syncPassiveCapture();
 
     chrome.storage.onChanged?.addListener((changes, areaName) => {
-      if (areaName !== 'local' || !changes[SETTINGS_STORAGE_KEY]) return;
-      if (isPassiveCaptureEnabledInStorage(changes[SETTINGS_STORAGE_KEY].newValue)) {
-        enablePassiveCapture();
-      } else {
-        disablePassiveCapture();
+      if (areaName === 'local' && (changes[SETTINGS_STORAGE_KEY] || changes[DATA_CONSENT_KEY])) {
+        void syncPassiveCapture();
       }
     });
   }

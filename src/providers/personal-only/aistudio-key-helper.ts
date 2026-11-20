@@ -5,6 +5,8 @@
  * or via copy button, and lets the user send it into agentCast with 1 click.
  */
 
+import { requireDataConsent } from '../../shared/data-consent';
+
 const GEMINI_KEY_REGEX = /\b(AIza[0-9A-Za-z_-]{35})\b/;
 
 export async function verifyGeminiApiKey(
@@ -19,10 +21,12 @@ export async function verifyGeminiApiKey(
   }
 
   try {
+    await requireDataConsent();
     const res = await fetch(
       'https://generativelanguage.googleapis.com/v1beta/models?pageSize=5',
       {
         headers: { 'x-goog-api-key': trimmed },
+        redirect: 'error',
       }
     );
 

@@ -10,6 +10,7 @@ import {
   type WatchTarget,
 } from '../shared/types';
 import { canonicalizeUrl, computeItemId, makeExcerpt } from '../shared/url-utils';
+import { DATA_CONSENT_REQUIRED, SETTINGS_STORAGE_KEY } from '../shared/data-consent';
 
 export interface ChapterAudioRecord {
   chapterKey: string; // `${episodeId}:${chapterIndex}`
@@ -27,6 +28,7 @@ class AgentCastDatabase extends Dexie {
   chapterAudio!: Table<ChapterAudioRecord, string>;
   watchTargets!: Table<WatchTarget, string>;
   videoDigests!: Table<VideoDigest, string>;
+  credentialKeys!: Table<{ id: string; key: CryptoKey }, string>;
 
   constructor() {
     super('agentCastDB');
@@ -43,20 +45,62 @@ class AgentCastDatabase extends Dexie {
       watchTargets: 'id, platform, enabled, status',
       videoDigests: 'videoId, createdAt',
     });
+    this.version(3).stores({ credentialKeys: 'id' });
   }
 }
 
 export const db = new AgentCastDatabase();
 
-const SETTINGS_STORAGE_KEY = 'agentcast_settings_v1';
+type ApiKeys = Pick<ExtensionSettings, 'geminiApiKey' | 'openaiApiKey'>;
+interface EncryptedApiKeys {
+  iv: number[];
+  ciphertext: number[];
+}
+
+const CREDENTIAL_KEY_ID = 'settings-api-keys-v1';
+
+async function encryptApiKeys(keys: ApiKeys): Promise<EncryptedApiKeys> {
+  let entry = await db.credentialKeys.get(CREDENTIAL_KEY_ID);
+  if (!entry) {
+    const candidate = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, [
+      'encrypt', 'decrypt',
+    ]);
+    entry = await db.transaction('rw', db.credentialKeys, async () => {
+      const existing = await db.credentialKeys.get(CREDENTIAL_KEY_ID);
+      if (existing) return existing;
+      const created = { id: CREDENTIAL_KEY_ID, key: candidate };
+      await db.credentialKeys.add(created);
+      return created;
+    });
+  }
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const encrypted = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv }, entry.key, new TextEncoder().encode(JSON.stringify(keys))
+  );
+  return { iv: Array.from(iv), ciphertext: Array.from(new Uint8Array(encrypted)) };
+}
+
+async function decryptApiKeys(envelope: EncryptedApiKeys): Promise<ApiKeys> {
+  const entry = await db.credentialKeys.get(CREDENTIAL_KEY_ID);
+  if (!entry) throw new Error('保存した API キーの暗号鍵が見つかりません。');
+  const decoded = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: Uint8Array.from(envelope.iv) },
+    entry.key,
+    Uint8Array.from(envelope.ciphertext)
+  );
+  return JSON.parse(new TextDecoder().decode(decoded)) as ApiKeys;
+}
 
 export async function getSettings(): Promise<ExtensionSettings> {
   if (typeof chrome !== 'undefined' && chrome.storage?.local) {
     const res = await chrome.storage.local.get(SETTINGS_STORAGE_KEY);
-    const saved = res[SETTINGS_STORAGE_KEY] as Partial<ExtensionSettings> | undefined;
+    const { encryptedApiKeys, ...saved } = (res[SETTINGS_STORAGE_KEY] ?? {}) as
+      Partial<ExtensionSettings> & { encryptedApiKeys?: EncryptedApiKeys };
+    const apiKeys = encryptedApiKeys ? await decryptApiKeys(encryptedApiKeys) : undefined;
     return {
       ...DEFAULT_SETTINGS,
       ...saved,
+      ...apiKeys,
       enabledSources: {
         ...DEFAULT_SETTINGS.enabledSources,
         ...(saved?.enabledSources ?? {}),
@@ -78,6 +122,20 @@ export async function getSettings(): Promise<ExtensionSettings> {
 }
 
 export async function saveSettings(partial: Partial<ExtensionSettings>): Promise<ExtensionSettings> {
+  if (DATA_CONSENT_REQUIRED) {
+    return navigator.locks.request(SETTINGS_STORAGE_KEY, () => writeSettings(partial));
+  }
+  return writeSettings(partial);
+}
+
+export async function migrateLegacyApiKeys(): Promise<void> {
+  if (!DATA_CONSENT_REQUIRED) return;
+  const result = await chrome.storage.local.get(SETTINGS_STORAGE_KEY);
+  const settings = result[SETTINGS_STORAGE_KEY] as Partial<ApiKeys> | undefined;
+  if (settings?.geminiApiKey || settings?.openaiApiKey) await saveSettings({});
+}
+
+async function writeSettings(partial: Partial<ExtensionSettings>): Promise<ExtensionSettings> {
   const current = await getSettings();
   const merged: ExtensionSettings = {
     ...current,
@@ -102,7 +160,17 @@ export async function saveSettings(partial: Partial<ExtensionSettings>): Promise
     },
   };
   if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-    await chrome.storage.local.set({ [SETTINGS_STORAGE_KEY]: merged });
+    if (DATA_CONSENT_REQUIRED) {
+      const { geminiApiKey, openaiApiKey, ...settings } = merged;
+      const encryptedApiKeys = geminiApiKey || openaiApiKey
+        ? await encryptApiKeys({ geminiApiKey, openaiApiKey })
+        : undefined;
+      await chrome.storage.local.set({
+        [SETTINGS_STORAGE_KEY]: encryptedApiKeys ? { ...settings, encryptedApiKeys } : settings,
+      });
+    } else {
+      await chrome.storage.local.set({ [SETTINGS_STORAGE_KEY]: merged });
+    }
   }
   return merged;
 }

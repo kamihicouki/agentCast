@@ -134,7 +134,7 @@ function generateManifest() {
     'tabs',
     'tabGroups',
     'scripting',
-    'activeTab',
+    ...(isPersonalMain ? ['activeTab'] : []),
   ];
 
   const mainContentMatches = [
@@ -162,7 +162,7 @@ function generateManifest() {
             'https://generativelanguage.googleapis.com/*',
             'https://api.openai.com/*',
           ],
-          optional_host_permissions: ['https://*/*', 'http://*/*'],
+          optional_host_permissions: ['https://*/*'],
         }),
     background: {
       service_worker: 'background.js',

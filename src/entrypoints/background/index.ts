@@ -5,6 +5,7 @@ import {
   ingestCandidates,
   makeChapterKey,
   markItemsConsumed,
+  migrateLegacyApiKeys,
   saveSettings,
 } from '../../storage/db';
 import {
@@ -27,6 +28,8 @@ import type {
   PendingPublishJob,
   RuntimeRequest,
 } from '../../shared/messages';
+import { DATA_CONSENT_KEY, DATA_CONSENT_REQUIRED, hasDataConsent, requireDataConsent } from '../../shared/data-consent';
+import { canReadPage, matchesPassiveSite, toOriginPattern } from '../../shared/permissions';
 import { parseZennRssXml } from '../../extractors/zenn';
 import { parseGenericRssOrAtomXml } from '../../extractors/custom-site';
 import {
@@ -156,8 +159,9 @@ chrome.runtime.onInstalled.addListener(async () => {
 });
 
 async function syncDailyAlarm(): Promise<void> {
-  const settings = await getSettings();
   await chrome.alarms.clear(ALARM_MORNING_CAST);
+  if (!(await hasDataConsent())) return;
+  const settings = await getSettings();
   if (!settings.autoScheduleEnabled) return;
 
   const [hh, mm] = (settings.autoScheduleTime || '07:30').split(':').map(Number);
@@ -174,9 +178,21 @@ async function syncDailyAlarm(): Promise<void> {
   });
 }
 
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes[DATA_CONSENT_KEY]) {
+    pendingPublishJob = null;
+    pendingPublishTabId = undefined;
+    void (async () => {
+      if (await hasDataConsent()) await migrateLegacyApiKeys();
+      await syncDailyAlarm();
+    })().catch(console.error);
+  }
+});
+
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === ALARM_MORNING_CAST) {
     void runBackgroundJob('定時巡回＆番組編成を開始しました...', async () => {
+      if (!(await hasDataConsent()) || !(await getSettings()).autoScheduleEnabled) return;
       await patrolAndGenerateEpisode();
     });
   }
@@ -289,39 +305,33 @@ async function waitForTabReady(tabId: number, timeoutMs = 16000): Promise<void> 
 
 // Automatically inject content.js on user-added custom sites with passiveEnabled
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (changeInfo.status !== 'complete' || !tab.url || !tab.url.startsWith('http')) return;
+  if (changeInfo.status !== 'complete' || !tab.url) return;
+  const pageUrl = tab.url;
   void (async () => {
+    if (!(await hasDataConsent())) return;
     const settings = await getSettings();
-    if (settings.passiveCaptureEnabled !== true || !settings.customSites?.length) return;
-    const matched = settings.customSites.find(
-      (s) => s.enabled && s.passiveEnabled && s.extractionStrategy !== 'rss' && urlMatchesCustomSite(tab.url!, s.url)
-    );
-    if (!matched) return;
+    if (settings.passiveCaptureEnabled !== true || !matchesPassiveSite(pageUrl, settings.customSites)
+        || !(await canReadPage(pageUrl))) return;
     try {
       await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] });
     } catch {
       // Restricted page or tab closed
     }
-  })();
+  })().catch(console.error);
 });
-
-function urlMatchesCustomSite(tabUrl: string, siteUrl: string): boolean {
-  try {
-    const a = new URL(tabUrl);
-    const b = new URL(siteUrl);
-    if (a.hostname !== b.hostname) return false;
-    const prefix = b.pathname.replace(/\/+$/, '');
-    return !prefix || a.pathname.startsWith(prefix);
-  } catch {
-    return false;
-  }
-}
 
 async function extractFromTab(
   tabId: number,
   scrollSteps = 0,
   customRule?: CustomExtractRule
 ): Promise<ExtractionResultPayload> {
+  if (DATA_CONSENT_REQUIRED) {
+    await requireDataConsent();
+    const { url } = await chrome.tabs.get(tabId);
+    if (!url || !(await canReadPage(url))) {
+      return { blocked: true, blockMessage: '許可済みの HTTPS ページのみ読み取れます。', candidates: [] };
+    }
+  }
   try {
     await chrome.scripting.executeScript({
       target: { tabId },
@@ -358,8 +368,7 @@ async function captureActiveTab(): Promise<{
   if (
     !tab?.id ||
     !tab.url ||
-    tab.url.startsWith('chrome://') ||
-    tab.url.startsWith('chrome-extension://')
+    !toOriginPattern(tab.url)
   ) {
     throw new Error('現在のタブは読み取り対象外のページ（Chrome内部ページ等）です。');
   }
@@ -409,7 +418,7 @@ async function patrolTabGroup(groupId: number): Promise<{
   const tabs = await chrome.tabs.query({ groupId });
   const readableTabs = tabs.filter(
     (t): t is chrome.tabs.Tab & { id: number; url: string } =>
-      Boolean(t.id && t.url && !t.url.startsWith('chrome://') && !t.url.startsWith('chrome-extension://'))
+      Boolean(t.id && t.url && toOriginPattern(t.url))
   );
 
   if (readableTabs.length === 0) {
@@ -500,11 +509,11 @@ async function patrolSources(requestedSources?: SourceId[]): Promise<{
   const deepFetchQueue: DeepFetchTask[] = [];
 
   // 1. Fast RSS check for Zenn first (zero tab overhead!)
-  if (targetSources.includes('zenn')) {
+  if (targetSources.includes('zenn') && await canReadPage('https://zenn.dev/feed')) {
     const zennDepth = resolvePatrolDepth('zenn', settings.sourcePatrolDepth?.zenn);
     try {
       updateJobProgress('Zenn トレンドフィードを取得中...');
-      const rssRes = await fetch('https://zenn.dev/feed');
+      const rssRes = await fetch('https://zenn.dev/feed', { redirect: 'error' });
       if (rssRes.ok) {
         const xml = await rssRes.text();
         const rssCandidates = parseZennRssXml(xml).slice(0, zennDepth.maxItems);
@@ -546,6 +555,10 @@ async function patrolSources(requestedSources?: SourceId[]): Promise<{
       for (const source of targetSources) {
         const meta = SOURCE_META[source];
         if (!meta?.startUrl) continue;
+        if (DATA_CONSENT_REQUIRED && !(await canReadPage(meta.startUrl))) {
+          warnings.push(`${meta.shortLabel}: サイトへのアクセス許可が必要です。`);
+          continue;
+        }
         const depth = resolvePatrolDepth(source, settings.sourcePatrolDepth?.[source]);
 
         updateJobProgress(
@@ -603,15 +616,20 @@ async function patrolSources(requestedSources?: SourceId[]): Promise<{
 
       // 2.5. Patrol user-added custom sites (DOM / Changelog / Readability / CSS selector / RSS)
       const activeCustomSites = (settings.customSites || []).filter(
-        (s) => s.enabled && s.url.trim().startsWith('http')
+        (s) => s.enabled && toOriginPattern(s.url)
       );
 
       for (const site of activeCustomSites) {
+        if (!(await hasDataConsent())) break;
+        if (!(await canReadPage(site.url))) {
+          warnings.push(`${site.name}: サイトへのアクセス許可が必要です。`);
+          continue;
+        }
         const depth = resolvePatrolDepth('generic', site.patrolDepth, site.scrollSteps);
         if (site.extractionStrategy === 'rss') {
           try {
             updateJobProgress(`RSS取得中: ${site.name}...`);
-            const rssRes = await fetch(site.url);
+            const rssRes = await fetch(site.url, DATA_CONSENT_REQUIRED ? { redirect: 'error' } : {});
             if (rssRes.ok) {
               const xml = await rssRes.text();
               const rssCandidates = parseGenericRssOrAtomXml(xml, site.name, site.url).slice(
@@ -684,6 +702,7 @@ async function patrolSources(requestedSources?: SourceId[]): Promise<{
 
       for (let i = 0; i < dedupedDeep.length; i++) {
         const task = dedupedDeep[i];
+        if (DATA_CONSENT_REQUIRED && !(await canReadPage(task.targetUrl))) continue;
         const target = task.candidate;
         updateJobProgress(
           `記事本文を展開中 (${i + 1}/${dedupedDeep.length}): ${target.title.slice(0, 26)}…`
@@ -708,7 +727,8 @@ async function patrolSources(requestedSources?: SourceId[]): Promise<{
           if (
             target.source === 'yahoo_news' &&
             first.needsFullArticleFetch &&
-            first.outboundUrls[0]
+            first.outboundUrls[0] &&
+            (!DATA_CONSENT_REQUIRED || await canReadPage(first.outboundUrls[0]))
           ) {
             await chrome.tabs.update(patrolTabId, { url: first.outboundUrls[0] });
             await waitForTabReady(patrolTabId, 12000);
@@ -736,12 +756,15 @@ async function patrolSingleCustomSite(site: CustomSiteConfig): Promise<{
   items: FeedItem[];
   warnings: string[];
 }> {
+  if (!(await canReadPage(site.url))) {
+    throw new Error('巡回するサイトへのアクセスを許可してください。ストア版は HTTPS のみに対応します。');
+  }
   const warnings: string[] = [];
   const depth = resolvePatrolDepth('generic', site.patrolDepth, site.scrollSteps);
 
   if (site.extractionStrategy === 'rss') {
     updateJobProgress(`RSS取得中: ${site.name}...`);
-    const rssRes = await fetch(site.url);
+    const rssRes = await fetch(site.url, DATA_CONSENT_REQUIRED ? { redirect: 'error' } : {});
     if (!rssRes.ok) {
       throw new Error(`${site.name} のRSS取得に失敗しました (HTTP ${rssRes.status})`);
     }
@@ -843,6 +866,7 @@ async function generateEpisodeFromItems(
   explicitItems?: FeedItem[],
   overrides?: { durationMin?: number; durationMode?: 'fixed' | 'auto' }
 ): Promise<PodcastEpisode> {
+  await requireDataConsent();
   const baseSettings = await getSettings();
   const settings: ExtensionSettings = {
     ...baseSettings,
@@ -913,6 +937,7 @@ async function generateEpisodeFromItems(
   try {
     let generated: { title: string; subtitle: string; chapters: PodcastEpisode['chapters'] };
 
+    await requireDataConsent();
     if (settings.aiMode === 'gemini_api') {
       generated = await generateScriptWithGemini(queueItems, settings, promptOpts);
     } else if (settings.aiMode === 'openai_api') {
@@ -955,6 +980,7 @@ async function generateEpisodeFromItems(
       let autoPlayTriggered = false;
 
       for (let i = 0; i < episodeWithScript.chapters.length; i++) {
+        await requireDataConsent();
         const ch = episodeWithScript.chapters[i];
         const progressText = `チャプター ${i + 1}/${episodeWithScript.chapters.length}「${ch.title.slice(0, 20)}」を音声合成中...`;
         episodeWithScript.statusDetail = progressText;
@@ -1047,6 +1073,9 @@ async function patrolAndGenerateEpisode(sources?: SourceId[]): Promise<{
 // ---------------------------------------------------------------------------
 
 async function openGroupedPatrolTab(url: string): Promise<number> {
+  if (DATA_CONSENT_REQUIRED && !(await canReadPage(url))) {
+    throw new Error('巡回するサイトへのアクセスを許可してください。');
+  }
   const tab = await chrome.tabs.create({ url, active: false });
   if (!tab.id) throw new Error('巡回タブを作成できませんでした。');
   if (chrome.tabs.group && chrome.tabGroups?.update) {
@@ -1085,13 +1114,18 @@ async function ingestRadarCandidates(): Promise<FeedItem[]> {
 function buildDigestLlmRunner(settings: ExtensionSettings): DigestLlmRunner | null {
   const hasGemini = Boolean(settings.geminiApiKey.trim());
   const hasOpenAI = Boolean(settings.openaiApiKey.trim());
-  const gemini: DigestLlmRunner = (prompt, opts) =>
-    generateTextWithGemini(
+  const gemini: DigestLlmRunner = async (prompt, opts) => {
+    await requireDataConsent();
+    return generateTextWithGemini(
       prompt,
       settings,
       opts.useVideoInput && opts.videoUrl ? [{ fileData: { fileUri: opts.videoUrl } }] : []
     );
-  const openai: DigestLlmRunner = (prompt) => generateTextWithOpenAI(prompt, settings);
+  };
+  const openai: DigestLlmRunner = async (prompt) => {
+    await requireDataConsent();
+    return generateTextWithOpenAI(prompt, settings);
+  };
 
   if (settings.aiMode === 'gemini_api' && hasGemini) return gemini;
   if (settings.aiMode === 'openai_api' && hasOpenAI) return openai;
@@ -1125,6 +1159,9 @@ function startVideoDigest(videoUrl: string, force = false): string {
         }
       }
       const settings = await getSettings();
+      if (DATA_CONSENT_REQUIRED && !(await canReadPage('https://www.youtube.com/'))) {
+        throw new Error('YouTube へのアクセスを許可してください。');
+      }
       const digest = await summarizeYouTubeVideo(
         videoUrl,
         settings,
@@ -1165,12 +1202,38 @@ async function playEpisodeInOffscreen(
   } satisfies RuntimeRequest);
 }
 
-chrome.runtime.onMessage.addListener((message: RuntimeRequest, _sender, sendResponse) => {
+const dataOperations = new Set<RuntimeRequest['type']>([
+  'PASSIVE_CANDIDATES', 'CAPTURE_ACTIVE_TAB', 'CAPTURE_AND_GENERATE_ACTIVE_TAB',
+  'LIST_TAB_GROUPS', 'PATROL_TAB_GROUP', 'PATROL_SOURCES', 'GENERATE_EPISODE_FROM_QUEUE',
+  'PATROL_AND_GENERATE', 'UPDATE_SETTINGS', 'PATROL_CUSTOM_SITE', 'START_GEMINI_KEY_SETUP',
+  'GEMINI_KEY_CAPTURED', 'VERIFY_GEMINI_KEY', 'START_PUBLISH_JOB', 'GET_PENDING_PUBLISH_JOB',
+  'CLEAR_PENDING_PUBLISH_JOB', 'RADAR_CHECK', 'RADAR_IMPORT_YOUTUBE_SUBS',
+  'RADAR_IMPORT_X_FOLLOWING', 'RADAR_ADD_TARGET', 'RADAR_GENERATE_EPISODE',
+  'SUMMARIZE_YOUTUBE_VIDEO', 'SUMMARIZE_ACTIVE_YOUTUBE_TAB',
+]);
+
+chrome.runtime.onMessage.addListener((message: RuntimeRequest, sender, sendResponse) => {
+  if (!DATA_CONSENT_REQUIRED || !dataOperations.has(message?.type)) {
+    return handleRequest(message, sender, sendResponse);
+  }
+  void requireDataConsent()
+    .then(() => handleRequest(message, sender, sendResponse))
+    .catch((error: Error) => sendResponse({ ok: false, error: error.message }));
+  return true;
+});
+
+function handleRequest(
+  message: RuntimeRequest,
+  sender: chrome.runtime.MessageSender,
+  sendResponse: (response?: unknown) => void
+): boolean {
   switch (message?.type) {
     case 'PASSIVE_CANDIDATES':
       void (async () => {
         const settings = await getSettings();
-        if (!settings.passiveCaptureEnabled) {
+        if (!settings.passiveCaptureEnabled || (DATA_CONSENT_REQUIRED &&
+            (!sender.url || !matchesPassiveSite(sender.url, settings.customSites) ||
+             !(await canReadPage(sender.url))))) {
           sendResponse({ ok: true, skipped: true });
           return;
         }
@@ -1401,7 +1464,7 @@ chrome.runtime.onMessage.addListener((message: RuntimeRequest, _sender, sendResp
         const updated = await saveSettings(message.settings);
         await syncDailyAlarm();
         sendResponse({ ok: true, settings: updated });
-      })();
+      })().catch((error: Error) => sendResponse({ ok: false, error: error.message }));
       return true;
 
     case 'PATROL_CUSTOM_SITE':
@@ -1431,6 +1494,10 @@ chrome.runtime.onMessage.addListener((message: RuntimeRequest, _sender, sendResp
       return true;
 
     case 'GEMINI_KEY_CAPTURED':
+      if (!sender.url?.startsWith('https://aistudio.google.com/')) {
+        sendResponse({ ok: false, error: 'AI Studio からキーを取得してください。' });
+        return false;
+      }
       void (async () => {
         const key = (message.apiKey || '').trim();
         const verify = await verifyGeminiApiKey(key);
@@ -1449,7 +1516,7 @@ chrome.runtime.onMessage.addListener((message: RuntimeRequest, _sender, sendResp
           message: verify.message,
         });
         sendResponse({ ok: true, message: verify.message });
-      })();
+      })().catch((error: Error) => sendResponse({ ok: false, error: error.message }));
       return true;
 
     case 'VERIFY_GEMINI_KEY':
@@ -1457,7 +1524,7 @@ chrome.runtime.onMessage.addListener((message: RuntimeRequest, _sender, sendResp
         const key = (message.apiKey ?? (await getSettings()).geminiApiKey).trim();
         const result = await verifyGeminiApiKey(key);
         sendResponse({ ok: result.valid, message: result.message });
-      })();
+      })().catch((error: Error) => sendResponse({ ok: false, error: error.message }));
       return true;
 
     case 'START_PUBLISH_JOB':
@@ -1469,11 +1536,14 @@ chrome.runtime.onMessage.addListener((message: RuntimeRequest, _sender, sendResp
       return true;
 
     case 'GET_PENDING_PUBLISH_JOB':
-      sendResponse({ ok: true, job: pendingPublishJob });
+      sendResponse({ ok: true, job: isPublishTarget(sender) ? pendingPublishJob : null });
       return false;
 
     case 'CLEAR_PENDING_PUBLISH_JOB':
-      pendingPublishJob = null;
+      if (isPublishTarget(sender)) {
+        pendingPublishJob = null;
+        pendingPublishTabId = undefined;
+      }
       sendResponse({ ok: true });
       return false;
 
@@ -1580,19 +1650,31 @@ chrome.runtime.onMessage.addListener((message: RuntimeRequest, _sender, sendResp
     default:
       return false;
   }
-});
+}
 
 let pendingPublishJob: PendingPublishJob | null = null;
+let pendingPublishTabId: number | undefined;
+
+function isPublishTarget(sender: chrome.runtime.MessageSender): boolean {
+  return Boolean(sender.url && pendingPublishJob && pendingPublishTabId !== undefined &&
+    sender.tab?.id === pendingPublishTabId &&
+    toOriginPattern(sender.url) === toOriginPattern(pendingPublishJob.targetUrl));
+}
 
 async function startPublishJob(job: PendingPublishJob): Promise<number | undefined> {
-  pendingPublishJob = job;
-
+  const hostname = job.platform === 'youtube' ? 'studio.youtube.com' : 'x.com';
+  if (toOriginPattern(job.targetUrl) !== `https://${hostname}/*` ||
+      !(await canReadPage(job.targetUrl))) {
+    throw new Error('公開補助先へのアクセスが許可されていません。');
+  }
   const tab = await chrome.tabs.create({
     url: job.targetUrl,
     active: true,
   });
   const tabId = tab.id;
   if (!tabId) return undefined;
+  pendingPublishJob = job;
+  pendingPublishTabId = tabId;
 
   const expectedHost =
     job.platform === 'youtube' ? 'studio.youtube.com' : 'x.com';
@@ -1603,8 +1685,7 @@ async function startPublishJob(job: PendingPublishJob): Promise<number | undefin
     try {
       const current = await chrome.tabs.get(tabId);
       if (!current.url) return;
-      const host = new URL(current.url).hostname;
-      if (!host.includes(expectedHost) && !(job.platform === 'x' && host.includes('twitter.com'))) {
+      if (!(await hasDataConsent()) || toOriginPattern(current.url) !== `https://${expectedHost}/*`) {
         return;
       }
       await chrome.scripting.executeScript({
@@ -1623,6 +1704,10 @@ async function startPublishJob(job: PendingPublishJob): Promise<number | undefin
   };
 
   const cleanup = () => {
+    if (pendingPublishTabId === tabId) {
+      pendingPublishJob = null;
+      pendingPublishTabId = undefined;
+    }
     chrome.tabs.onUpdated.removeListener(onUpdated);
     chrome.tabs.onRemoved.removeListener(onRemoved);
   };
@@ -1645,6 +1730,9 @@ async function startPublishJob(job: PendingPublishJob): Promise<number | undefin
 }
 
 async function startGeminiKeySetup(): Promise<number | undefined> {
+  if (!(await canReadPage('https://aistudio.google.com/apikey'))) {
+    throw new Error('AI Studio へのアクセスが許可されていません。');
+  }
   const tab = await chrome.tabs.create({
     url: 'https://aistudio.google.com/apikey',
     active: true,
@@ -1655,7 +1743,7 @@ async function startGeminiKeySetup(): Promise<number | undefined> {
   const tryInject = async () => {
     try {
       const current = await chrome.tabs.get(tabId);
-      if (!current.url || !current.url.startsWith('https://aistudio.google.com/')) {
+      if (!(await hasDataConsent()) || !current.url?.startsWith('https://aistudio.google.com/')) {
         return;
       }
       await chrome.scripting.executeScript({

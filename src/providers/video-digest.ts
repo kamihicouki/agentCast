@@ -32,6 +32,7 @@ export async function fetchVideoSourceMaterial(videoUrl: string): Promise<VideoS
   const res = await fetch(`https://www.youtube.com/watch?v=${videoId}&hl=ja`, {
     headers: FETCH_HEADERS,
     credentials: 'include',
+    redirect: 'error',
   });
   if (!res.ok) throw new Error(`YouTube動画ページの取得に失敗しました (HTTP ${res.status})`);
   const html = await res.text();
@@ -43,7 +44,10 @@ export async function fetchVideoSourceMaterial(videoUrl: string): Promise<VideoS
   if (track) {
     // Best-effort: YouTube may require a PO token for timedtext; failure falls back to description.
     try {
-      const capRes = await fetch(`${track.baseUrl}&fmt=json3`, { credentials: 'include' });
+      const captionUrl = new URL(track.baseUrl);
+      if (captionUrl.origin !== 'https://www.youtube.com') return { info, transcript };
+      captionUrl.searchParams.set('fmt', 'json3');
+      const capRes = await fetch(captionUrl, { credentials: 'include', redirect: 'error' });
       const body = capRes.ok ? await capRes.text() : '';
       if (body.trim().startsWith('{')) {
         transcript = parseJson3Transcript(JSON.parse(body));

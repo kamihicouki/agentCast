@@ -6,6 +6,10 @@ MacBook + Bluetoothイヤホンでの「ながら聴き」に最適化されて�
 
 ---
 
+## Chrome Web Store 版
+
+[プライバシーポリシー](docs/chrome-web-store/PRIVACY_POLICY.md) · [公開手順](docs/chrome-web-store/RELEASE_CHECKLIST.md)
+
 ## 1. MacBook の Chrome へのインストール & 即時オートリロード手順
 
 クラウド開発環境での更新を手元のローカル Chrome に即座に反映するため、`build-meta.json` の変更を検知して自動で `chrome.runtime.reload()` を実行する **Dev Auto-Reloader** を内蔵しています（※音声再生中は勝手に途切れないよう待機し、Side Panel 上に更新ボタンを表示します）。

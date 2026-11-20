@@ -1,3 +1,4 @@
+import { requireDataConsent } from '../shared/data-consent';
 import type {
   EpisodeChapter,
   ExtensionSettings,
@@ -25,14 +26,17 @@ export async function generateScriptWithOpenAI(
   const model = settings.openaiModel.trim() || 'gpt-4o-mini';
   const prompt = buildPodcastScriptPrompt(items, settings, promptOpts);
 
+  await requireDataConsent();
   const response = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
+    redirect: 'error',
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
       model,
+      store: false,
       response_format: { type: 'json_object' },
       temperature: 0.5,
       messages: [
@@ -68,11 +72,14 @@ export async function generateTextWithOpenAI(
 ): Promise<string> {
   const apiKey = settings.openaiApiKey.trim();
   if (!apiKey) throw new Error('OpenAI APIキーが未設定です。');
+  await requireDataConsent();
   const response = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
+    redirect: 'error',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
     body: JSON.stringify({
       model: settings.openaiModel.trim() || 'gpt-4o-mini',
+      store: false,
       response_format: { type: 'json_object' },
       temperature: 0.3,
       messages: [
@@ -105,8 +112,10 @@ export async function synthesizeChapterWithOpenAITts(
 
   for (const turn of chapter.turns) {
     const voice = turn.speaker === 'HostA' ? 'onyx' : 'nova';
+    await requireDataConsent();
     const res = await fetch('https://api.openai.com/v1/audio/speech', {
       method: 'POST',
+      redirect: 'error',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${apiKey}`,

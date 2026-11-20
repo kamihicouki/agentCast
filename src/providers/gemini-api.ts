@@ -1,3 +1,4 @@
+import { requireDataConsent } from '../shared/data-consent';
 import type {
   EpisodeChapter,
   ExtensionSettings,
@@ -27,8 +28,10 @@ export async function generateScriptWithGemini(
   const model = settings.geminiModel.trim() || 'gemini-flash-latest';
   const prompt = buildPodcastScriptPrompt(items, settings, promptOpts);
 
+  await requireDataConsent();
   const response = await fetch(`${GEMINI_API_BASE}/${encodeURIComponent(model)}:generateContent`, {
     method: 'POST',
+    redirect: 'error',
     headers: {
       'Content-Type': 'application/json',
       'x-goog-api-key': apiKey,
@@ -72,8 +75,10 @@ export async function generateTextWithGemini(
   const apiKey = settings.geminiApiKey.trim();
   if (!apiKey) throw new Error('Gemini APIキーが未設定です。');
   const model = settings.geminiModel.trim() || 'gemini-flash-latest';
+  await requireDataConsent();
   const response = await fetch(`${GEMINI_API_BASE}/${encodeURIComponent(model)}:generateContent`, {
     method: 'POST',
+    redirect: 'error',
     headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
     body: JSON.stringify({
       contents: [{ role: 'user', parts: [...extraParts, { text: prompt }] }],
@@ -156,10 +161,12 @@ async function requestGeminiTtsModel(
     },
   };
 
+  await requireDataConsent();
   const response = await fetch(
     `${GEMINI_API_BASE}/${encodeURIComponent(modelId)}:generateContent`,
     {
       method: 'POST',
+      redirect: 'error',
       headers: {
         'Content-Type': 'application/json',
         'x-goog-api-key': apiKey,

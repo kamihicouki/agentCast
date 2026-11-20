@@ -12,6 +12,15 @@ import {
 } from '../../shared/types';
 import type { DevBuildStatus, PendingPublishJob, RuntimeRequest } from '../../shared/messages';
 import {
+  DATA_CONSENT_KEY,
+  DATA_CONSENT_REQUIRED,
+  DATA_CONSENT_VERSION,
+  hasCurrentDataConsent,
+  hasDataConsent,
+  PRIVACY_POLICY_URL,
+} from '../../shared/data-consent';
+import { ensureHostPermissionsForUrls, patrolPermissionUrls } from '../../shared/permissions';
+import {
   copyEpisodeMarkdown,
   downloadEpisodeAudio,
   downloadPortableHtmlPlayer,
@@ -76,6 +85,75 @@ function deriveEpisodeSubtitle(ep: PodcastEpisode): string {
 }
 
 export function App() {
+  const [accepted, setAccepted] = useState<boolean | null>(DATA_CONSENT_REQUIRED ? null : true);
+  const [saving, setSaving] = useState(false);
+  const [consentError, setConsentError] = useState('');
+
+  useEffect(() => {
+    if (!DATA_CONSENT_REQUIRED) return;
+    let active = true;
+    let observedChange = false;
+    const onChange: Parameters<typeof chrome.storage.onChanged.addListener>[0] = (changes, area) => {
+      if (area !== 'local' || !changes[DATA_CONSENT_KEY]) return;
+      observedChange = true;
+      setAccepted(hasCurrentDataConsent(changes[DATA_CONSENT_KEY].newValue));
+    };
+    chrome.storage.onChanged.addListener(onChange);
+    void hasDataConsent().then((value) => {
+      if (active && !observedChange) setAccepted(value);
+    }).catch(() => {
+      if (active && !observedChange) setAccepted(false);
+    });
+    return () => {
+      active = false;
+      chrome.storage.onChanged.removeListener(onChange);
+    };
+  }, []);
+
+  if (accepted) {
+    return <AgentCastStudio onRevokeConsent={DATA_CONSENT_REQUIRED ? async () => {
+      await chrome.storage.local.remove(DATA_CONSENT_KEY);
+    } : undefined} />;
+  }
+
+  const accept = async () => {
+    setSaving(true);
+    setConsentError('');
+    try {
+      await chrome.storage.local.set({ [DATA_CONSENT_KEY]: DATA_CONSENT_VERSION });
+      setAccepted(true);
+    } catch {
+      setConsentError('同意を保存できませんでした。もう一度お試しください。');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <main className="studio-main">
+      <section className="n-primary-card" aria-labelledby="agentcast-data-consent">
+        <h1 id="agentcast-data-consent">agentCast のデータ取り扱い</h1>
+        {accepted === null ? <p role="status">設定を読み込み中です。</p> : <>
+          <ul>
+            <li>指定したサイトやタブの URL・見出し・本文、購読ソース、設定、API キー、生成物は Chrome 内に保存します。閲覧中の受動収集と定時巡回は個別にオンにできます。</li>
+            <li>番組作成時は素材のテキスト・URL・番組設定・直近番組の見出しと要約を、設定した Gemini API または OpenAI API に送信します。定時生成では未読素材も自動で選びます。</li>
+            <li>YouTube 要約では動画情報・字幕または動画 URL、クラウド音声合成では生成した台本を AI に送信します。API キーは対応するサービスへの認証に使います。</li>
+            <li>Gemini には Cloud Billing が有効なプロジェクトのキーを使い、OpenAI API ではモデル改善へのデータ共有をオフにしてください。</li>
+            <li>共有・公開補助を使うと、番組の投稿文や動画が選択した共有先、YouTube または X に渡ります。開発者への送信やトラッキングはありません。</li>
+          </ul>
+          <p>同意は設定で取り消せます。同意せずにサイドパネルを閉じることもできます。</p>
+          <p><a href={PRIVACY_POLICY_URL} target="_blank" rel="noreferrer">プライバシーポリシー</a></p>
+          <button className="btn-primary" type="button" disabled={saving} onClick={() => void accept()}>
+            データの取り扱いに同意して続ける
+          </button>
+          {consentError && <p role="alert">{consentError}</p>}
+        </>}
+      </section>
+    </main>
+  );
+}
+
+function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<void> }) {
   const [tab, setTab] = useState<ActiveTab>('patrol');
   const [didInitTab, setDidInitTab] = useState(false);
   const [episodes, setEpisodes] = useState<PodcastEpisode[]>([]);
@@ -276,12 +354,22 @@ export function App() {
   );
 
   const handlePatchSettings = async (patch: Partial<ExtensionSettings>) => {
+    if (patch.autoScheduleEnabled && !(await ensureHostPermissionsForUrls(patrolPermissionUrls(settings)))) {
+      setErrorBanner('定時巡回に必要なサイトへのアクセスが許可されませんでした。');
+      return;
+    }
     const next = { ...settings, ...patch };
     setSettings(next);
-    await chrome.runtime.sendMessage({
-      type: 'UPDATE_SETTINGS',
-      settings: patch,
-    } satisfies RuntimeRequest);
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: 'UPDATE_SETTINGS',
+        settings: patch,
+      } satisfies RuntimeRequest);
+      if (!response?.ok) throw new Error(response?.error || '設定を保存できませんでした。');
+    } catch (error) {
+      setErrorBanner(error instanceof Error ? error.message : String(error));
+      await refreshData();
+    }
   };
 
   const handleDeleteEpisode = async (episodeId: string) => {
@@ -438,6 +526,10 @@ export function App() {
     setIsExporting(true);
     setBusyMessage('YouTube 公開用 MP4 動画を準備中...');
     try {
+      const targetUrl = buildYouTubeStudioUploadUrl(settings.publish.youtubeChannelIdOrUrl);
+      if (!(await ensureHostPermissionsForUrls([targetUrl]))) {
+        throw new Error('YouTube Studio へのアクセスが許可されませんでした。');
+      }
       let videoBase64: string | undefined;
       let fileName: string | undefined;
       if (hasAudioExportable) {
@@ -449,7 +541,6 @@ export function App() {
         }
       }
       const ytMeta = buildYouTubeMetadata(displayedEpisode, settings.publish);
-      const targetUrl = buildYouTubeStudioUploadUrl(settings.publish.youtubeChannelIdOrUrl);
       const job: PendingPublishJob = {
         id: `pub-yt-${Date.now()}`,
         platform: 'youtube',
@@ -469,7 +560,7 @@ export function App() {
         type: 'START_PUBLISH_JOB',
         job,
       } satisfies RuntimeRequest);
-      if (!res?.ok) await chrome.tabs.create({ url: targetUrl, active: true });
+      if (!res?.ok) throw new Error(res?.error || 'YouTube Studio を開けませんでした。');
       showToast('YouTube Studio を開きました。右下の公開ガイドからセットできます');
     } catch (err) {
       setErrorBanner(`YouTube 公開準備エラー: ${err instanceof Error ? err.message : String(err)}`);
@@ -485,6 +576,9 @@ export function App() {
     setIsExporting(true);
     setBusyMessage('X.com 投稿データを準備中...');
     try {
+      if (!(await ensureHostPermissionsForUrls(['https://x.com/']))) {
+        throw new Error('X へのアクセスが許可されませんでした。');
+      }
       let videoBase64: string | undefined;
       let fileName: string | undefined;
       if (settings.publish.xAttachVideo && hasAudioExportable) {
@@ -515,7 +609,7 @@ export function App() {
         type: 'START_PUBLISH_JOB',
         job,
       } satisfies RuntimeRequest);
-      if (!res?.ok) await chrome.tabs.create({ url: targetUrl, active: true });
+      if (!res?.ok) throw new Error(res?.error || 'X を開けませんでした。');
       showToast('X.com の投稿画面を開きました');
     } catch (err) {
       setErrorBanner(`X.com 投稿準備エラー: ${err instanceof Error ? err.message : String(err)}`);
@@ -529,6 +623,9 @@ export function App() {
     setErrorBanner('');
     setKeyVerifyStatus(null);
     try {
+      if (!(await ensureHostPermissionsForUrls(['https://aistudio.google.com/apikey']))) {
+        throw new Error('AI Studio へのアクセスが許可されませんでした。');
+      }
       const res = await chrome.runtime.sendMessage({
         type: 'START_GEMINI_KEY_SETUP',
       } satisfies RuntimeRequest);
@@ -536,16 +633,9 @@ export function App() {
         showToast('Google AI Studio を開きました。右下のガイドから1クリックで設定できます');
         return;
       }
-    } catch {
-      // fallback below
-    }
-    try {
-      await chrome.tabs.create({ url: 'https://aistudio.google.com/apikey', active: true });
-      showToast('Google AI Studio を開きました');
+      throw new Error(res?.error || 'Google AI Studio を開けませんでした。');
     } catch (err) {
-      setErrorBanner(
-        `Google AI Studio を開けませんでした: ${err instanceof Error ? err.message : String(err)}`
-      );
+      setErrorBanner(err instanceof Error ? err.message : String(err));
     }
   };
 
@@ -700,6 +790,9 @@ export function App() {
             onVerifyGeminiKey={handleVerifyGeminiKey}
             onCreateDemo={handleCreateDemo}
             onGoToPatrol={() => setTab('patrol')}
+            onRevokeConsent={onRevokeConsent ? () => {
+              void onRevokeConsent().catch(() => setErrorBanner('同意を取り消せませんでした。'));
+            } : undefined}
           />
         )}
 

@@ -6,6 +6,7 @@ import type {
   YouTubeVisibility,
 } from '../../shared/types';
 import type { RuntimeRequest } from '../../shared/messages';
+import { DATA_CONSENT_REQUIRED, PRIVACY_POLICY_URL } from '../../shared/data-consent';
 
 const GEMINI_VOICES = ['Puck', 'Aoede', 'Kore', 'Charon', 'Fenrir', 'Leda'];
 
@@ -20,6 +21,7 @@ interface SettingsPanelProps {
   onVerifyGeminiKey: () => Promise<void>;
   onCreateDemo: () => Promise<void>;
   onGoToPatrol: () => void;
+  onRevokeConsent?: () => void;
 }
 
 export function SettingsPanel({
@@ -33,6 +35,7 @@ export function SettingsPanel({
   onVerifyGeminiKey,
   onCreateDemo,
   onGoToPatrol,
+  onRevokeConsent,
 }: SettingsPanelProps) {
   const isAiReady =
     settings.aiMode === 'web_chatgpt' ||
@@ -85,7 +88,7 @@ export function SettingsPanel({
             }}
           >
             <option value="gemini_api">
-              Google AI Pro/Ultra 推奨：Gemini API 直結 (クレジット/無料枠)
+              {DATA_CONSENT_REQUIRED ? 'Gemini API（Cloud Billing 有効）' : 'Gemini API 直結'}
             </option>
             {typeof __AGENTCAST_TARGET__ === 'undefined' || __AGENTCAST_TARGET__ === 'main' ? (
               <>
@@ -100,6 +103,15 @@ export function SettingsPanel({
             <option value="openai_api">OpenAI API 直結（GPT-4o / gpt-4o-mini）</option>
           </select>
         </div>
+        {onRevokeConsent && (
+          <p className="field-hint">
+            <a href={PRIVACY_POLICY_URL} target="_blank" rel="noreferrer">プライバシーポリシー</a>
+            {' '}
+            <button type="button" className="btn-ghost" onClick={onRevokeConsent}>
+              データ取り扱いの同意を取り消す
+            </button>
+          </p>
+        )}
 
         {(settings.aiMode === 'gemini_api' || settings.ttsMode === 'gemini_tts') && (
           <div className="field-row">

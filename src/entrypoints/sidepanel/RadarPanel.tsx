@@ -10,6 +10,7 @@ import {
   type WatchTarget,
 } from '../../shared/types';
 import type { RuntimeRequest } from '../../shared/messages';
+import { requestPatrolPermissions } from '../../shared/permissions';
 import { formatRelativeJa } from '../../shared/radar-utils';
 import { extractYouTubeVideoId, formatDurationSec } from '../../extractors/youtube';
 
@@ -201,6 +202,9 @@ export function RadarPanel({
   const send = async (msg: RuntimeRequest, okToast?: string) => {
     setErrorBanner('');
     try {
+      if (!(await requestPatrolPermissions(msg, settings))) {
+        throw new Error('対象サイトへのアクセスが許可されませんでした。');
+      }
       const res = await chrome.runtime.sendMessage(msg);
       if (!res?.ok) setErrorBanner(res?.error || '操作に失敗しました');
       else if (okToast) showToast(okToast);

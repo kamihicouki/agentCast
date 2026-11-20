@@ -21,7 +21,8 @@ import {
 import type { RuntimeRequest } from '../../shared/messages';
 import { formatRelativeJa } from '../../shared/radar-utils';
 import { extractYouTubeVideoId } from '../../extractors/youtube';
-import { ensureHostPermissionsForUrls } from '../../shared/permissions';
+import { ensureHostPermissionsForUrls, requestPatrolPermissions, toOriginPattern } from '../../shared/permissions';
+import { DATA_CONSENT_REQUIRED } from '../../shared/data-consent';
 import { DigestCard } from './RadarPanel';
 import { PatrolDepthControl } from './PatrolDepthControl';
 
@@ -149,6 +150,9 @@ export function PatrolPanel({
   const send = async (msg: RuntimeRequest, okToast?: string) => {
     setErrorBanner('');
     try {
+      if (!(await requestPatrolPermissions(msg, settings))) {
+        throw new Error('対象サイトへのアクセスが許可されませんでした。ストア版は HTTPS のみに対応します。');
+      }
       const res = await chrome.runtime.sendMessage(msg);
       if (!res?.ok) setErrorBanner(res?.error || '操作に失敗しました');
       else if (okToast) showToast(okToast);
@@ -227,7 +231,7 @@ export function PatrolPanel({
   const handlePrefillActiveTab = async () => {
     try {
       const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (!active?.url || !active.url.startsWith('http')) {
+      if (!active?.url || !toOriginPattern(active.url)) {
         setErrorBanner('現在のタブは追加できないページです。');
         return;
       }
@@ -246,8 +250,12 @@ export function PatrolPanel({
 
   const handleAddCustomSite = async () => {
     const url = siteDraft.url.trim();
-    if (!url.startsWith('http')) {
-      setErrorBanner('https:// または http:// で始まるURLを入力してください。');
+    if (!toOriginPattern(url)) {
+      setErrorBanner(DATA_CONSENT_REQUIRED ? 'HTTPS の URL を入力してください。' : 'HTTP または HTTPS の URL を入力してください。');
+      return;
+    }
+    if (siteDraft.passiveEnabled && !(await ensureHostPermissionsForUrls([url]))) {
+      setErrorBanner('受動収集の対象サイトへのアクセスが許可されませんでした。');
       return;
     }
     const name = siteDraft.name.trim() || new URL(url).hostname;
@@ -267,6 +275,14 @@ export function PatrolPanel({
 
   const handleSaveCustomEdit = async () => {
     if (!editingCustom) return;
+    if (!toOriginPattern(editingCustom.url)) {
+      setErrorBanner(DATA_CONSENT_REQUIRED ? 'HTTPS の URL を入力してください。' : 'HTTP または HTTPS の URL を入力してください。');
+      return;
+    }
+    if (editingCustom.passiveEnabled && !(await ensureHostPermissionsForUrls([editingCustom.url]))) {
+      setErrorBanner('受動収集の対象サイトへのアクセスが許可されませんでした。');
+      return;
+    }
     const next = (settings.customSites || []).map((s) =>
       s.id === editingCustom.id ? editingCustom : s
     );
@@ -833,19 +849,7 @@ export function PatrolPanel({
           className="btn-primary"
           style={{ width: '100%', marginTop: 8 }}
           disabled={isJobRunning}
-          onClick={async () => {
-            const urls = [
-              ...visibleBuiltins
-                .filter((id) => settings.enabledSources[id])
-                .map((id) => SOURCE_META[id].startUrl)
-                .filter(Boolean),
-              ...(settings.customSites || []).filter((s) => s.enabled).map((s) => s.url),
-            ];
-            const granted = await ensureHostPermissionsForUrls(urls);
-            if (!granted) {
-              setErrorBanner('巡回対象サイトへのアクセス権限が許可されなかったため中止しました。');
-              return;
-            }
+          onClick={() => {
             void send({ type: 'PATROL_SOURCES' }, '巡回を開始しました。集まった素材はキューに入ります');
           }}
         >
@@ -911,7 +915,7 @@ export function PatrolPanel({
               onClick={async () => {
                 if (selectedGroupId === '') return;
                 const groupTabs = await chrome.tabs.query({ groupId: selectedGroupId });
-                const urls = groupTabs.map((t) => t.url).filter((u): u is string => Boolean(u));
+                const urls = groupTabs.map((t) => t.url).filter((u): u is string => Boolean(u && toOriginPattern(u)));
                 if (!(await ensureHostPermissionsForUrls(urls))) {
                   setErrorBanner('タブグループ内のページを読み取る権限が許可されませんでした。');
                   return;
