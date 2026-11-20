@@ -315,7 +315,7 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
   customSites: [],
   publish: { ...DEFAULT_PUBLISH_SETTINGS },
   maxItemsPerPatrol: 24,
-  passiveCaptureEnabled: true,
+  passiveCaptureEnabled: false,
   autoScheduleEnabled: false,
   autoScheduleTime: '07:30',
   playbackRate: 1.0,

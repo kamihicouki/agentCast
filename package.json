@@ -1,6 +1,6 @@
 {
   "name": "agent-cast",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "private": true,
   "description": "Personal AI Podcast Chrome Extension powered by your own browser sessions",
   "type": "module",

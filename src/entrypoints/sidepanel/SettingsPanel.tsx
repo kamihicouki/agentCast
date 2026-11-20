@@ -320,7 +320,12 @@ export function SettingsPanel({
           </p>
         </div>
         <div className="toggle-row">
-          <span>普段の閲覧中に自動で受動ストック</span>
+          <div>
+            <div>閲覧中の自動受動ストック（既定OFF・オプトイン）</div>
+            <p className="field-hint">
+              ON にした場合のみ、許可済みサイトの閲覧時に本文候補の自動抽出を行います。OFF の間は手動操作まで読み取りを開始しません。
+            </p>
+          </div>
           <input
             type="checkbox"
             checked={settings.passiveCaptureEnabled}

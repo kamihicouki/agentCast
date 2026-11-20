@@ -6,6 +6,7 @@ import {
   type FeedItem,
 } from '../../shared/types';
 import type { RuntimeRequest } from '../../shared/messages';
+import { ensureHostPermissionsForUrls } from '../../shared/permissions';
 
 interface QueuePanelProps {
   queue: FeedItem[];
@@ -90,6 +91,11 @@ export function QueuePanel({
   const handleCaptureTab = async () => {
     setErrorBanner('');
     try {
+      const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (active?.url && !(await ensureHostPermissionsForUrls([active.url]))) {
+        setErrorBanner('このページを読み取る権限が許可されませんでした。');
+        return;
+      }
       const res = await chrome.runtime.sendMessage({
         type: 'CAPTURE_ACTIVE_TAB',
       } satisfies RuntimeRequest);

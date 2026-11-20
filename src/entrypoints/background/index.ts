@@ -287,7 +287,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status !== 'complete' || !tab.url || !tab.url.startsWith('http')) return;
   void (async () => {
     const settings = await getSettings();
-    if (!settings.passiveCaptureEnabled || !settings.customSites?.length) return;
+    if (settings.passiveCaptureEnabled !== true || !settings.customSites?.length) return;
     const matched = settings.customSites.find(
       (s) => s.enabled && s.passiveEnabled && s.extractionStrategy !== 'rss' && urlMatchesCustomSite(tab.url!, s.url)
     );
@@ -1128,14 +1128,21 @@ chrome.runtime.onMessage.addListener((message: RuntimeRequest, _sender, sendResp
         sendResponse({ ok: false, error: '現在別の番組生成が実行中です。' });
         return false;
       }
+      if (Array.isArray(message.itemIds) && message.itemIds.length === 0) {
+        sendResponse({ ok: false, error: '番組に含める素材を1件以上選択してください。' });
+        return false;
+      }
       sendResponse({ ok: true, started: true });
       void runBackgroundJob('キューの素材から番組台本を構成中...', async () => {
         let explicit: FeedItem[] | undefined;
-        if (Array.isArray(message.itemIds) && message.itemIds.length > 0) {
+        if (Array.isArray(message.itemIds)) {
           const picked = (await db.feedItems.bulkGet(message.itemIds)).filter(
             (i): i is FeedItem => Boolean(i)
           );
-          if (picked.length > 0) explicit = picked;
+          if (picked.length === 0) {
+            throw new Error('選択された素材が見つかりませんでした。キューを更新して再度お試しください。');
+          }
+          explicit = picked;
         }
         await generateEpisodeFromItems(explicit, {
           durationMin: message.durationMin,

@@ -4,8 +4,15 @@ import type {
   ExtractionResultPayload,
   RuntimeRequest,
 } from '../../shared/messages';
+import type { ExtensionSettings } from '../../shared/types';
 
+const SETTINGS_STORAGE_KEY = 'agentcast_settings_v1';
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+export function isPassiveCaptureEnabledInStorage(stored: unknown): boolean {
+  if (!stored || typeof stored !== 'object') return false;
+  return (stored as Partial<ExtensionSettings>).passiveCaptureEnabled === true;
+}
 
 async function gentleScrollAndExtract(
   scrollSteps = 0,
@@ -43,10 +50,12 @@ async function gentleScrollAndExtract(
 }
 
 // Guard against duplicate listener registration when injected on demand
-const win = window as Window & { __agentCastContentReady__?: boolean };
-if (!win.__agentCastContentReady__) {
-  win.__agentCastContentReady__ = true;
+if (typeof window !== 'undefined' && typeof chrome !== 'undefined' && chrome.runtime) {
+  const win = window as Window & { __agentCastContentReady__?: boolean };
+  if (!win.__agentCastContentReady__) {
+    win.__agentCastContentReady__ = true;
 
+  // Always respond to explicit user-triggered extraction requests (patrol / tab group / active tab)
   chrome.runtime.onMessage.addListener((message: RuntimeRequest, _sender, sendResponse) => {
     if (message?.type === 'CONTENT_EXTRACT_NOW') {
       void gentleScrollAndExtract(message.scrollSteps ?? 0, message.customRule).then(sendResponse);
@@ -55,11 +64,15 @@ if (!win.__agentCastContentReady__) {
     return false;
   });
 
-  // Passive browsing capture: gently observe user scrolling on supported timelines/articles
+  // Passive browsing capture: strictly gated behind explicit user opt-in (passiveCaptureEnabled === true).
+  // When OFF (the default on fresh install), neither timers nor scroll listeners nor extractFromDocument run.
+  let passiveActive = false;
   let debounceTimer: number | null = null;
-  let lastSentHashes = new Set<string>();
+  let initialTimer: number | null = null;
+  const lastSentHashes = new Set<string>();
 
   const flushPassiveCapture = () => {
+    if (!passiveActive) return;
     const res = extractFromDocument(document, window.location.href);
     if (res.blocked || res.candidates.length === 0) return;
 
@@ -84,12 +97,54 @@ if (!win.__agentCastContentReady__) {
   };
 
   const schedulePassiveCapture = () => {
+    if (!passiveActive) return;
     if (debounceTimer !== null) {
       window.clearTimeout(debounceTimer);
     }
     debounceTimer = window.setTimeout(flushPassiveCapture, 1800);
   };
 
-  window.addEventListener('scroll', schedulePassiveCapture, { passive: true });
-  window.setTimeout(flushPassiveCapture, 2200);
+  const enablePassiveCapture = () => {
+    if (passiveActive) return;
+    passiveActive = true;
+    window.addEventListener('scroll', schedulePassiveCapture, { passive: true });
+    initialTimer = window.setTimeout(flushPassiveCapture, 2200);
+  };
+
+  const disablePassiveCapture = () => {
+    if (!passiveActive) return;
+    passiveActive = false;
+    window.removeEventListener('scroll', schedulePassiveCapture);
+    if (debounceTimer !== null) {
+      window.clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }
+    if (initialTimer !== null) {
+      window.clearTimeout(initialTimer);
+      initialTimer = null;
+    }
+  };
+
+  if (chrome.storage?.local) {
+    chrome.storage.local
+      .get(SETTINGS_STORAGE_KEY)
+      .then((res) => {
+        if (isPassiveCaptureEnabledInStorage(res?.[SETTINGS_STORAGE_KEY])) {
+          enablePassiveCapture();
+        }
+      })
+      .catch(() => {
+        // Default OFF on storage read error
+      });
+
+    chrome.storage.onChanged?.addListener((changes, areaName) => {
+      if (areaName !== 'local' || !changes[SETTINGS_STORAGE_KEY]) return;
+      if (isPassiveCaptureEnabledInStorage(changes[SETTINGS_STORAGE_KEY].newValue)) {
+        enablePassiveCapture();
+      } else {
+        disablePassiveCapture();
+      }
+    });
+  }
+  }
 }

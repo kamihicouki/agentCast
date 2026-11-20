@@ -18,6 +18,7 @@ import {
 import type { RuntimeRequest } from '../../shared/messages';
 import { formatRelativeJa } from '../../shared/radar-utils';
 import { extractYouTubeVideoId } from '../../extractors/youtube';
+import { ensureHostPermissionsForUrls } from '../../shared/permissions';
 import { DigestCard } from './RadarPanel';
 
 interface PatrolPanelProps {
@@ -52,7 +53,7 @@ const EMPTY_SITE_DRAFT: Omit<CustomSiteConfig, 'id'> = {
   name: '',
   url: '',
   enabled: true,
-  passiveEnabled: true,
+  passiveEnabled: false,
   extractionStrategy: 'auto',
   cssSelector: '',
   scrollSteps: 0,
@@ -802,7 +803,19 @@ export function PatrolPanel({
           className="btn-primary"
           style={{ width: '100%', marginTop: 8 }}
           disabled={isJobRunning}
-          onClick={() => {
+          onClick={async () => {
+            const urls = [
+              ...visibleBuiltins
+                .filter((id) => settings.enabledSources[id])
+                .map((id) => SOURCE_META[id].startUrl)
+                .filter(Boolean),
+              ...(settings.customSites || []).filter((s) => s.enabled).map((s) => s.url),
+            ];
+            const granted = await ensureHostPermissionsForUrls(urls);
+            if (!granted) {
+              setErrorBanner('巡回対象サイトへのアクセス権限が許可されなかったため中止しました。');
+              return;
+            }
             void send({ type: 'PATROL_SOURCES' }, '巡回を開始しました。集まった素材はキューに入ります');
           }}
         >
@@ -814,6 +827,11 @@ export function PatrolPanel({
             className="btn-secondary"
             disabled={isJobRunning}
             onClick={async () => {
+              const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+              if (active?.url && !(await ensureHostPermissionsForUrls([active.url]))) {
+                setErrorBanner('このページを読み取る権限が許可されませんでした。');
+                return;
+              }
               const res = await send({ type: 'CAPTURE_ACTIVE_TAB' });
               if (res?.ok) {
                 showToast(`今のタブから ${res.inserted} 件をキューに追加しました`);
@@ -827,12 +845,17 @@ export function PatrolPanel({
             type="button"
             className="btn-secondary"
             disabled={isJobRunning}
-            onClick={() =>
+            onClick={async () => {
+              const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+              if (active?.url && !(await ensureHostPermissionsForUrls([active.url]))) {
+                setErrorBanner('このページを読み取る権限が許可されませんでした。');
+                return;
+              }
               void send(
                 { type: 'CAPTURE_AND_GENERATE_ACTIVE_TAB' },
                 '今のタブだけで番組を作成します'
-              )
-            }
+              );
+            }}
           >
             ⚡ 今のタブを即番組化
           </button>
@@ -855,8 +878,14 @@ export function PatrolPanel({
               type="button"
               className="btn-secondary"
               disabled={isJobRunning || selectedGroupId === ''}
-              onClick={() => {
+              onClick={async () => {
                 if (selectedGroupId === '') return;
+                const groupTabs = await chrome.tabs.query({ groupId: selectedGroupId });
+                const urls = groupTabs.map((t) => t.url).filter((u): u is string => Boolean(u));
+                if (!(await ensureHostPermissionsForUrls(urls))) {
+                  setErrorBanner('タブグループ内のページを読み取る権限が許可されませんでした。');
+                  return;
+                }
                 void send(
                   { type: 'PATROL_TAB_GROUP', groupId: selectedGroupId, generateAfter: false },
                   'タブグループの巡回を開始しました'
