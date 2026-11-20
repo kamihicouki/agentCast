@@ -3,11 +3,14 @@ import { db } from '../../storage/db';
 import {
   DIGEST_VERDICT_META,
   EXTRACTION_STRATEGY_META,
+  PATROL_DEPTH_PRESET_META,
   PATROL_SOURCE_IDS,
   SOURCE_META,
+  resolvePatrolDepth,
   type CustomSiteConfig,
   type ExtensionSettings,
   type ExtractionStrategy,
+  type PatrolDepthConfig,
   type RadarItem,
   type SourceId,
   type TabGroupSummary,
@@ -20,6 +23,7 @@ import { formatRelativeJa } from '../../shared/radar-utils';
 import { extractYouTubeVideoId } from '../../extractors/youtube';
 import { ensureHostPermissionsForUrls } from '../../shared/permissions';
 import { DigestCard } from './RadarPanel';
+import { PatrolDepthControl } from './PatrolDepthControl';
 
 interface PatrolPanelProps {
   settings: ExtensionSettings;
@@ -408,6 +412,18 @@ export function PatrolPanel({
             </div>
           </div>
 
+          <PatrolDepthControl
+            sourceId="generic"
+            value={resolvePatrolDepth('generic', current.patrolDepth, current.scrollSteps)}
+            onChange={(nextDepth: PatrolDepthConfig) =>
+              setEditingCustom({
+                ...current,
+                patrolDepth: nextDepth,
+                scrollSteps: nextDepth.scrollSteps,
+              })
+            }
+          />
+
           <div className="n-card">
             <div className="field-row">
               <label className="field-label">表示名</label>
@@ -623,6 +639,20 @@ export function PatrolPanel({
             </button>
           )}
         </div>
+
+        {/* Per-site Patrol Depth Control */}
+        <PatrolDepthControl
+          sourceId={srcId}
+          value={resolvePatrolDepth(srcId, settings.sourcePatrolDepth?.[srcId])}
+          onChange={(nextDepth: PatrolDepthConfig) =>
+            void onPatchSettings({
+              sourcePatrolDepth: {
+                ...(settings.sourcePatrolDepth ?? {}),
+                [srcId]: nextDepth,
+              },
+            })
+          }
+        />
 
         {/* Radar Targets List inside YouTube / X detail */}
         {platform && (
@@ -1025,6 +1055,17 @@ export function PatrolPanel({
                 <div className="flat-source-top">
                   <span>{SOURCE_ICONS[srcId]}</span>
                   <span className="flat-source-name">{meta.shortLabel}</span>
+                  {(() => {
+                    const d = resolvePatrolDepth(srcId, settings.sourcePatrolDepth?.[srcId]);
+                    return (
+                      <span
+                        className={`depth-pill is-${d.preset}`}
+                        title={`スクロール${d.scrollSteps}回 / 最大${d.maxItems}件 / 本文展開${d.deepFetchLimit}件`}
+                      >
+                        {PATROL_DEPTH_PRESET_META[d.preset].shortLabel}
+                      </span>
+                    );
+                  })()}
                   {badge && <span className="pill-badge is-sage">{badge}</span>}
                 </div>
                 <div className="flat-source-sub">{summary}</div>
@@ -1068,6 +1109,17 @@ export function PatrolPanel({
               <div className="flat-source-top">
                 <span>🔗</span>
                 <span className="flat-source-name">{site.name}</span>
+                {(() => {
+                  const d = resolvePatrolDepth('generic', site.patrolDepth, site.scrollSteps);
+                  return (
+                    <span
+                      className={`depth-pill is-${d.preset}`}
+                      title={`スクロール${d.scrollSteps}回 / 最大${d.maxItems}件 / 本文展開${d.deepFetchLimit}件`}
+                    >
+                      {PATROL_DEPTH_PRESET_META[d.preset].shortLabel}
+                    </span>
+                  );
+                })()}
                 <span className="method-badge">
                   {EXTRACTION_STRATEGY_META[site.extractionStrategy].label}
                 </span>

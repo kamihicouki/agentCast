@@ -61,6 +61,9 @@ export async function getSettings(): Promise<ExtensionSettings> {
         ...DEFAULT_SETTINGS.enabledSources,
         ...(saved?.enabledSources ?? {}),
       },
+      sourcePatrolDepth: {
+        ...(saved?.sourcePatrolDepth ?? {}),
+      },
       customSites: Array.isArray(saved?.customSites) ? saved.customSites : [],
       removedBuiltinSources: Array.isArray(saved?.removedBuiltinSources)
         ? saved.removedBuiltinSources
@@ -82,6 +85,10 @@ export async function saveSettings(partial: Partial<ExtensionSettings>): Promise
     enabledSources: {
       ...current.enabledSources,
       ...(partial.enabledSources ?? {}),
+    },
+    sourcePatrolDepth: {
+      ...(current.sourcePatrolDepth ?? {}),
+      ...(partial.sourcePatrolDepth ?? {}),
     },
     customSites: Array.isArray(partial.customSites)
       ? partial.customSites

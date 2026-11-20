@@ -31,7 +31,7 @@ agentCast は、あなたが明示的に選んだ Web 記事・タブグルー�
 > ユーザーが明示的に指定・選択した Web ページ・タブグループ・購読ソースのテキストを抽出し、ユーザー自身の AI API キーを用いて日本語ポッドキャスト番組（台本および音声）に編成してブラウザ内で再生すること。
 
 ### 各権限の正当性説明（Permission Justifications）
-※ 実際の `dist/agentCast-v0.5.1-cws.zip` 内 `manifest.json` の全権限と 1対1 で一致しています。
+※ 実際の `dist/agentCast-v0.6.0-cws.zip` 内 `manifest.json` の全権限と 1対1 で一致しています。
 
 | 権限 | 審査フォーム貼り付け用説明 |
 |---|---|

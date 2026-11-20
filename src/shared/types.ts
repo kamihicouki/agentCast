@@ -19,6 +19,121 @@ export const PATROL_SOURCE_IDS: SourceId[] = [
 
 export type ExtractionStrategy = 'auto' | 'readability' | 'changelog' | 'css_selector' | 'rss';
 
+export type PatrolDepthPreset = 'shallow' | 'standard' | 'deep' | 'custom';
+
+export interface PatrolDepthConfig {
+  preset: PatrolDepthPreset;
+  /** Scroll steps performed by content script (0..6). */
+  scrollSteps: number;
+  /** Max items ingested per site per patrol (3..30). */
+  maxItems: number;
+  /** Max detail/article pages fetched for full body expansion (0..8). */
+  deepFetchLimit: number;
+  /** Follow external links (e.g. X outbound article links / custom site card links). */
+  followOutboundLinks: boolean;
+}
+
+export const PATROL_DEPTH_PRESET_META: Record<
+  PatrolDepthPreset,
+  { label: string; shortLabel: string; description: string }
+> = {
+  shallow: {
+    label: '浅い',
+    shortLabel: '浅',
+    description: '一覧の見出しだけ高速に取得（スクロールなし・本文展開なし）',
+  },
+  standard: {
+    label: '標準',
+    shortLabel: '標準',
+    description: '速度と情報量のバランス重視（現行の標準設定）',
+  },
+  deep: {
+    label: '深い',
+    shortLabel: '深',
+    description: 'しっかりスクロールし、記事本文や外部リンク先まで深掘り',
+  },
+  custom: {
+    label: 'カスタム',
+    shortLabel: '調整',
+    description: '個別パラメータで微調整された深さ設定',
+  },
+};
+
+function clampInt(val: number, min: number, max: number, fallback: number): number {
+  if (!Number.isFinite(val)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(val)));
+}
+
+export function buildPatrolDepthPreset(
+  preset: Exclude<PatrolDepthPreset, 'custom'>,
+  sourceId?: SourceId
+): PatrolDepthConfig {
+  if (preset === 'shallow') {
+    return {
+      preset: 'shallow',
+      scrollSteps: 0,
+      maxItems: 6,
+      deepFetchLimit: 0,
+      followOutboundLinks: false,
+    };
+  }
+  if (preset === 'deep') {
+    return {
+      preset: 'deep',
+      scrollSteps: 4,
+      maxItems: 20,
+      deepFetchLimit: 5,
+      followOutboundLinks: true,
+    };
+  }
+  // 'standard' preserves each site's tuned default scroll behavior
+  const defaultScroll =
+    sourceId === 'x' ? 2 : sourceId === 'note' || sourceId === 'youtube' ? 1 : 0;
+  return {
+    preset: 'standard',
+    scrollSteps: defaultScroll,
+    maxItems: 12,
+    deepFetchLimit: 2,
+    followOutboundLinks: false,
+  };
+}
+
+export function resolvePatrolDepth(
+  sourceId?: SourceId,
+  override?: Partial<PatrolDepthConfig>,
+  legacyScrollSteps?: number
+): PatrolDepthConfig {
+  const base = buildPatrolDepthPreset(
+    override?.preset && override.preset !== 'custom' ? override.preset : 'standard',
+    sourceId
+  );
+  if (!override) {
+    if (typeof legacyScrollSteps === 'number' && legacyScrollSteps > 0) {
+      return {
+        ...base,
+        preset: 'custom',
+        scrollSteps: clampInt(legacyScrollSteps, 0, 6, base.scrollSteps),
+      };
+    }
+    return base;
+  }
+  return {
+    preset: override.preset || base.preset,
+    scrollSteps: clampInt(override.scrollSteps ?? base.scrollSteps, 0, 6, base.scrollSteps),
+    maxItems: clampInt(override.maxItems ?? base.maxItems, 3, 30, base.maxItems),
+    deepFetchLimit: clampInt(
+      override.deepFetchLimit ?? base.deepFetchLimit,
+      0,
+      8,
+      base.deepFetchLimit
+    ),
+    followOutboundLinks:
+      typeof override.followOutboundLinks === 'boolean'
+        ? override.followOutboundLinks
+        : base.followOutboundLinks,
+  };
+}
+
 export interface CustomSiteConfig {
   id: string;
   name: string;
@@ -28,6 +143,7 @@ export interface CustomSiteConfig {
   extractionStrategy: ExtractionStrategy;
   cssSelector?: string;
   scrollSteps: number;
+  patrolDepth?: PatrolDepthConfig;
   notes?: string;
 }
 
@@ -268,6 +384,8 @@ export interface ExtensionSettings {
   /** 'fixed' uses targetDurationMin; 'auto' lets the AI fit duration to the material. */
   durationMode: DurationMode;
   enabledSources: Record<SourceId, boolean>;
+  /** Per-site patrol depth overrides for built-in sources. */
+  sourcePatrolDepth: Partial<Record<SourceId, PatrolDepthConfig>>;
   /** Built-in sources removed by the user from the flat patrol list (can be re-added from presets). */
   removedBuiltinSources: SourceId[];
   customSites: CustomSiteConfig[];
@@ -311,6 +429,7 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
     youtube: true,
     generic: true,
   },
+  sourcePatrolDepth: {},
   removedBuiltinSources: [],
   customSites: [],
   publish: { ...DEFAULT_PUBLISH_SETTINGS },

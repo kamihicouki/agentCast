@@ -24,7 +24,7 @@ async function gentleScrollAndExtract(
   }
 
   const mergedByUrl = new Map(firstPass.candidates.map((c) => [c.url, c]));
-  const maxSteps = Math.min(scrollSteps, 4);
+  const maxSteps = Math.min(scrollSteps, 6);
 
   for (let i = 0; i < maxSteps; i++) {
     const jitter = 650 + Math.floor(Math.random() * 450);

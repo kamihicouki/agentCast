@@ -11,6 +11,7 @@ import {
   INITIAL_PLAYBACK_STATE,
   PATROL_SOURCE_IDS,
   SOURCE_META,
+  resolvePatrolDepth,
   type CustomSiteConfig,
   type ExtractedCandidate,
   type ExtensionSettings,
@@ -57,7 +58,11 @@ import {
 import { runPromptViaWebSession } from '../../providers/personal-only/web-llm-bridge';
 import { generateTextWithGemini } from '../../providers/gemini-api';
 import { generateTextWithOpenAI } from '../../providers/openai-api';
-import { summarizeYouTubeVideo, type DigestLlmRunner } from '../../providers/video-digest';
+import {
+  fetchVideoSourceMaterial,
+  summarizeYouTubeVideo,
+  type DigestLlmRunner,
+} from '../../providers/video-digest';
 import { extractYouTubeVideoId } from '../../extractors/youtube';
 import {
   addWatchTarget,
@@ -436,6 +441,50 @@ async function patrolTabGroup(groupId: number): Promise<{
   return { inserted: totalInserted, items: collectedItems, warnings };
 }
 
+interface DeepFetchTask {
+  candidate: ExtractedCandidate;
+  targetUrl: string;
+  mode: 'article' | 'outbound_enrich';
+}
+
+async function enrichYouTubeCandidates(
+  candidates: ExtractedCandidate[],
+  limit: number
+): Promise<ExtractedCandidate[]> {
+  if (limit <= 0) return candidates;
+  const enriched = [...candidates];
+  let done = 0;
+  for (let i = 0; i < enriched.length && done < limit; i++) {
+    const c = enriched[i];
+    const vid = extractYouTubeVideoId(c.url);
+    if (!vid) continue;
+    done++;
+    const cached = await db.videoDigests.get(vid);
+    if (cached) {
+      enriched[i] = {
+        ...c,
+        content: `${c.content}\n【AI事前要約】${cached.oneLiner} ${cached.summary.join(' ')}（判定: ${cached.verdict}）`,
+      };
+      continue;
+    }
+    try {
+      updateJobProgress(`YouTube 動画の詳細を取得中 (${done}/${limit}): ${c.title.slice(0, 24)}…`);
+      const material = await fetchVideoSourceMaterial(c.url);
+      const extra = material.transcript
+        ? `【字幕抜粋】${material.transcript.slice(0, 1400)}`
+        : material.info.description
+          ? `【概要欄】${material.info.description.slice(0, 1000)}`
+          : '';
+      if (extra) {
+        enriched[i] = { ...c, content: `${c.content}\n${extra}` };
+      }
+    } catch {
+      // Keep original feed card candidate on fetch failure
+    }
+  }
+  return enriched;
+}
+
 async function patrolSources(requestedSources?: SourceId[]): Promise<{
   inserted: number;
   warnings: string[];
@@ -448,19 +497,26 @@ async function patrolSources(requestedSources?: SourceId[]): Promise<{
 
   let totalInserted = 0;
   const warnings: string[] = [];
-  const deepFetchQueue: ExtractedCandidate[] = [];
+  const deepFetchQueue: DeepFetchTask[] = [];
 
   // 1. Fast RSS check for Zenn first (zero tab overhead!)
   if (targetSources.includes('zenn')) {
+    const zennDepth = resolvePatrolDepth('zenn', settings.sourcePatrolDepth?.zenn);
     try {
       updateJobProgress('Zenn トレンドフィードを取得中...');
       const rssRes = await fetch('https://zenn.dev/feed');
       if (rssRes.ok) {
         const xml = await rssRes.text();
-        const rssCandidates = parseZennRssXml(xml);
+        const rssCandidates = parseZennRssXml(xml).slice(0, zennDepth.maxItems);
         const res = await ingestCandidates(rssCandidates);
         totalInserted += res.inserted;
-        deepFetchQueue.push(...rssCandidates.filter((c) => c.needsFullArticleFetch).slice(0, 2));
+        if (zennDepth.deepFetchLimit > 0) {
+          for (const c of rssCandidates
+            .filter((x) => x.needsFullArticleFetch)
+            .slice(0, zennDepth.deepFetchLimit)) {
+            deepFetchQueue.push({ candidate: c, targetUrl: c.url, mode: 'article' });
+          }
+        }
       }
     } catch {
       // Proceed to tab fallback
@@ -490,8 +546,11 @@ async function patrolSources(requestedSources?: SourceId[]): Promise<{
       for (const source of targetSources) {
         const meta = SOURCE_META[source];
         if (!meta?.startUrl) continue;
+        const depth = resolvePatrolDepth(source, settings.sourcePatrolDepth?.[source]);
 
-        updateJobProgress(`${meta.shortLabel} をログインセッションで読み取り中...`);
+        updateJobProgress(
+          `${meta.shortLabel} を読み取り中（深さ: ${depth.preset} / スクロール${depth.scrollSteps}回）...`
+        );
 
         await chrome.tabs.update(patrolTabId, { url: meta.startUrl });
         await waitForTabReady(patrolTabId, 16000);
@@ -499,40 +558,79 @@ async function patrolSources(requestedSources?: SourceId[]): Promise<{
           source === 'x' || source === 'google_news' || source === 'youtube' ? 2400 : 1500
         );
 
-        const scrollSteps = source === 'x' ? 2 : source === 'note' || source === 'youtube' ? 1 : 0;
-        const extracted = await extractFromTab(patrolTabId, scrollSteps);
+        const extracted = await extractFromTab(patrolTabId, depth.scrollSteps);
 
         if (extracted.blocked) {
           warnings.push(`${meta.shortLabel}: ${extracted.blockMessage || 'スキップしました'}`);
           continue;
         }
 
-        const limited = extracted.candidates.slice(0, 12);
+        let limited = extracted.candidates.slice(0, depth.maxItems);
+
+        // Deep YouTube enrichment: attach cached digest or transcript/description for top N videos
+        if (source === 'youtube' && depth.deepFetchLimit > 0) {
+          limited = await enrichYouTubeCandidates(limited, depth.deepFetchLimit);
+        }
+
         const saved = await ingestCandidates(limited);
         totalInserted += saved.inserted;
 
-        const needsDeep = limited.filter((c) => c.needsFullArticleFetch).slice(0, 2);
-        deepFetchQueue.push(...needsDeep);
+        if (depth.deepFetchLimit > 0) {
+          if (source === 'x' && depth.followOutboundLinks) {
+            const withOutbound = [...limited]
+              .filter((c) => c.outboundUrls[0]?.startsWith('http'))
+              .sort((a, b) => (b.engagementScore ?? 0) - (a.engagementScore ?? 0))
+              .slice(0, depth.deepFetchLimit);
+            for (const c of withOutbound) {
+              deepFetchQueue.push({
+                candidate: c,
+                targetUrl: c.outboundUrls[0],
+                mode: 'outbound_enrich',
+              });
+            }
+          } else if (source !== 'youtube') {
+            for (const c of limited
+              .filter((x) => x.needsFullArticleFetch)
+              .slice(0, depth.deepFetchLimit)) {
+              deepFetchQueue.push({ candidate: c, targetUrl: c.url, mode: 'article' });
+            }
+          }
+        }
 
         broadcastEvent({ type: 'QUEUE_UPDATED' });
         await sleep(700 + Math.floor(Math.random() * 500));
       }
 
-      // 2.5. Patrol user-added custom sites (DOM / Changelog / Readability / CSS selector)
+      // 2.5. Patrol user-added custom sites (DOM / Changelog / Readability / CSS selector / RSS)
       const activeCustomSites = (settings.customSites || []).filter(
         (s) => s.enabled && s.url.trim().startsWith('http')
       );
 
       for (const site of activeCustomSites) {
+        const depth = resolvePatrolDepth('generic', site.patrolDepth, site.scrollSteps);
         if (site.extractionStrategy === 'rss') {
           try {
             updateJobProgress(`RSS取得中: ${site.name}...`);
             const rssRes = await fetch(site.url);
             if (rssRes.ok) {
               const xml = await rssRes.text();
-              const rssCandidates = parseGenericRssOrAtomXml(xml, site.name, site.url);
+              const rssCandidates = parseGenericRssOrAtomXml(xml, site.name, site.url).slice(
+                0,
+                depth.maxItems
+              );
               const saved = await ingestCandidates(rssCandidates);
               totalInserted += saved.inserted;
+              if (depth.followOutboundLinks && depth.deepFetchLimit > 0) {
+                for (const c of rssCandidates
+                  .filter((x) => x.outboundUrls[0] && x.outboundUrls[0] !== site.url)
+                  .slice(0, depth.deepFetchLimit)) {
+                  deepFetchQueue.push({
+                    candidate: c,
+                    targetUrl: c.outboundUrls[0],
+                    mode: 'outbound_enrich',
+                  });
+                }
+              }
               broadcastEvent({ type: 'QUEUE_UPDATED' });
             } else {
               warnings.push(`${site.name}: RSS取得エラー (HTTP ${rssRes.status})`);
@@ -550,7 +648,7 @@ async function patrolSources(requestedSources?: SourceId[]): Promise<{
         await waitForTabReady(patrolTabId, 16000);
         await sleep(1600);
 
-        const extracted = await extractFromTab(patrolTabId, site.scrollSteps ?? 0, {
+        const extracted = await extractFromTab(patrolTabId, depth.scrollSteps, {
           strategy: site.extractionStrategy,
           cssSelector: site.cssSelector,
           siteName: site.name,
@@ -561,22 +659,52 @@ async function patrolSources(requestedSources?: SourceId[]): Promise<{
           continue;
         }
 
-        const saved = await ingestCandidates(extracted.candidates.slice(0, 12));
+        const limited = extracted.candidates.slice(0, depth.maxItems);
+        const saved = await ingestCandidates(limited);
         totalInserted += saved.inserted;
+        if (depth.followOutboundLinks && depth.deepFetchLimit > 0) {
+          for (const c of limited
+            .filter((x) => x.outboundUrls[0] && x.outboundUrls[0] !== site.url)
+            .slice(0, depth.deepFetchLimit)) {
+            deepFetchQueue.push({
+              candidate: c,
+              targetUrl: c.outboundUrls[0],
+              mode: 'outbound_enrich',
+            });
+          }
+        }
         broadcastEvent({ type: 'QUEUE_UPDATED' });
         await sleep(600);
       }
 
-      // 3. Expand top 4 headline/pickup items (e.g. Yahoo! Pickup -> Full Article, Note/Zenn body)
-      for (const target of deepFetchQueue.slice(0, 4)) {
-        updateJobProgress(`注目記事の本文を展開中: ${target.title.slice(0, 28)}…`);
-        await chrome.tabs.update(patrolTabId, { url: target.url });
+      // 3. Expand detail/article pages (overall safety cap: 16 pages per patrol)
+      const dedupedDeep = Array.from(
+        new Map(deepFetchQueue.map((task) => [task.targetUrl, task])).values()
+      ).slice(0, 16);
+
+      for (let i = 0; i < dedupedDeep.length; i++) {
+        const task = dedupedDeep[i];
+        const target = task.candidate;
+        updateJobProgress(
+          `記事本文を展開中 (${i + 1}/${dedupedDeep.length}): ${target.title.slice(0, 26)}…`
+        );
+        await chrome.tabs.update(patrolTabId, { url: task.targetUrl });
         await waitForTabReady(patrolTabId, 14000);
         await sleep(1100);
 
         const deepExtracted = await extractFromTab(patrolTabId, 0);
         if (!deepExtracted.blocked && deepExtracted.candidates.length > 0) {
           const first = deepExtracted.candidates[0];
+          if (task.mode === 'outbound_enrich') {
+            // Attach linked article body to the originating candidate (e.g. X post or RSS/custom item)
+            await ingestCandidates([
+              {
+                ...target,
+                content: `${target.content}\n\n【リンク先記事: ${first.title}】\n${first.content.slice(0, 1800)}`,
+              },
+            ]);
+            continue;
+          }
           if (
             target.source === 'yahoo_news' &&
             first.needsFullArticleFetch &&
@@ -609,6 +737,8 @@ async function patrolSingleCustomSite(site: CustomSiteConfig): Promise<{
   warnings: string[];
 }> {
   const warnings: string[] = [];
+  const depth = resolvePatrolDepth('generic', site.patrolDepth, site.scrollSteps);
+
   if (site.extractionStrategy === 'rss') {
     updateJobProgress(`RSS取得中: ${site.name}...`);
     const rssRes = await fetch(site.url);
@@ -616,7 +746,7 @@ async function patrolSingleCustomSite(site: CustomSiteConfig): Promise<{
       throw new Error(`${site.name} のRSS取得に失敗しました (HTTP ${rssRes.status})`);
     }
     const xml = await rssRes.text();
-    const candidates = parseGenericRssOrAtomXml(xml, site.name, site.url);
+    const candidates = parseGenericRssOrAtomXml(xml, site.name, site.url).slice(0, depth.maxItems);
     const saved = await ingestCandidates(candidates);
     broadcastEvent({ type: 'QUEUE_UPDATED' });
     return { inserted: saved.inserted, items: saved.items, warnings };
@@ -646,7 +776,7 @@ async function patrolSingleCustomSite(site: CustomSiteConfig): Promise<{
     await waitForTabReady(tabId, 16000);
     await sleep(1500);
 
-    const extracted = await extractFromTab(tabId, site.scrollSteps ?? 0, {
+    const extracted = await extractFromTab(tabId, depth.scrollSteps, {
       strategy: site.extractionStrategy,
       cssSelector: site.cssSelector,
       siteName: site.name,
@@ -657,7 +787,8 @@ async function patrolSingleCustomSite(site: CustomSiteConfig): Promise<{
       return { inserted: 0, items: [], warnings };
     }
 
-    const saved = await ingestCandidates(extracted.candidates.slice(0, 14));
+    const limited = extracted.candidates.slice(0, depth.maxItems);
+    const saved = await ingestCandidates(limited);
     broadcastEvent({ type: 'QUEUE_UPDATED' });
     return { inserted: saved.inserted, items: saved.items, warnings };
   } finally {
