@@ -249,6 +249,8 @@ export const DEFAULT_PUBLISH_SETTINGS: PublishSettings = {
   xAttachVideo: true,
 };
 
+export type DurationMode = 'fixed' | 'auto';
+
 export interface ExtensionSettings {
   aiMode: AIMode;
   ttsMode: TTSMode;
@@ -261,8 +263,13 @@ export interface ExtensionSettings {
   hostBVoice: string;
   openaiApiKey: string;
   openaiModel: string;
-  targetDurationMin: 5 | 10 | 15;
+  /** Target podcast length in minutes (slider 3..30) when durationMode === 'fixed'. */
+  targetDurationMin: number;
+  /** 'fixed' uses targetDurationMin; 'auto' lets the AI fit duration to the material. */
+  durationMode: DurationMode;
   enabledSources: Record<SourceId, boolean>;
+  /** Built-in sources removed by the user from the flat patrol list (can be re-added from presets). */
+  removedBuiltinSources: SourceId[];
   customSites: CustomSiteConfig[];
   publish: PublishSettings;
   maxItemsPerPatrol: number;
@@ -271,10 +278,12 @@ export interface ExtensionSettings {
   autoScheduleTime: string;
   playbackRate: number;
   focusTopics: string;
-  /** Look-back window (hours) for the very first radar check of a target. */
+  /** Look-back window (hours) for the very first radar check & script freshness. */
   radarWindowHours: number;
-  /** Run the follow radar automatically as part of 「巡回して番組作成」. */
+  /** Run the follow radar automatically as part of patrol. */
   radarIncludeInPatrol: boolean;
+  /** Only include YouTube channels with new activity when patrolling. */
+  youtubeOnlyActiveInPatrol: boolean;
   /** Max X accounts visited per radar run (tab-based, rate-friendly). */
   radarMaxXAccountsPerRun: number;
 }
@@ -292,6 +301,7 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
   openaiApiKey: '',
   openaiModel: 'gpt-4o-mini',
   targetDurationMin: 10,
+  durationMode: 'fixed',
   enabledSources: {
     x: true,
     note: true,
@@ -301,6 +311,7 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
     youtube: true,
     generic: true,
   },
+  removedBuiltinSources: [],
   customSites: [],
   publish: { ...DEFAULT_PUBLISH_SETTINGS },
   maxItemsPerPatrol: 24,
@@ -311,6 +322,7 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
   focusTopics: 'AI・テクノロジー・開発トレンド・主要ニュース',
   radarWindowHours: 72,
   radarIncludeInPatrol: false,
+  youtubeOnlyActiveInPatrol: true,
   radarMaxXAccountsPerRun: 12,
 };
 

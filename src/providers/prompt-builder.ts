@@ -148,10 +148,29 @@ export function buildPodcastScriptPrompt(
 ): string {
   const now = options.now ?? Date.now();
   const recentTopics = options.recentTopics ?? [];
-  const targetChapters =
-    settings.targetDurationMin <= 5 ? '2〜3個' : settings.targetDurationMin <= 10 ? '4〜5個' : '6〜7個';
-  const turnsPerChapter =
-    settings.targetDurationMin <= 5 ? '4〜6往復' : settings.targetDurationMin <= 10 ? '6〜9往復' : '8〜12往復';
+  const isAutoDuration = settings.durationMode === 'auto';
+  const dur = Math.max(3, Math.min(30, Math.round(settings.targetDurationMin || 10)));
+  const targetChapters = isAutoDuration
+    ? '素材の情報量に合わせて自然な数（3〜6個程度）'
+    : dur <= 5
+      ? '2〜3個'
+      : dur <= 10
+        ? '4〜5個'
+        : dur <= 18
+          ? '5〜7個'
+          : '7〜9個';
+  const turnsPerChapter = isAutoDuration
+    ? '話題の重要度に応じて5〜10往復'
+    : dur <= 5
+      ? '4〜6往復'
+      : dur <= 10
+        ? '6〜9往復'
+        : dur <= 18
+          ? '8〜12往復'
+          : '10〜14往復';
+  const durationGuidance = isAutoDuration
+    ? '全体尺は素材量に応じて無理なく聴き切れる自然な長さ（おまかせ）に調整し、'
+    : `全体の再生時間がおよそ ${dur} 分になるようにペース配分し、`;
 
   const serializedItems = items
     .slice(0, 28)
@@ -204,7 +223,7 @@ ${bodySnippet}`;
 3. 同じニュースや関連する話題（例：Yahoo!/Googleニュースの報道とXでの反応、ZennとNoteの類似技術テーマ、同一プロダクトの複数リリースノート）は分かりやすくチャプターに整理・統合し、多角的に紹介してください。
 4. **タイトルとサブタイトルの差別化（重要）**：毎回同じ「○月○日 午後のテック＆トレンドダイジェスト」のような汎用タイトルは使わず、**その回の中心トピック・固有名詞を含めた一目で区別できるタイトル**にしてください。また \`subtitle\` には収集内容を解析した**主要トピック2〜3件の要点サマリー（45〜70文字程度）**を必ず入れてください。
 5. 英語の記事やリリースノート（Changelog等）が含まれる場合は、**必ず自然な日本語で噛み砕いて解説**してください。バージョン番号やスラッシュコマンド（例: v2.33.0 → バージョン2.33.0、/swarm → スウォームコマンド、SSH → エスエスエイチ）は \`spokenText\` で滑らかに発音できる表記にしてください。
-6. 全体で ${targetChapters} のトピックチャプター（先頭の短いオープニング挨拶を含む）に編成し、各チャプターは ${turnsPerChapter} のテンポ良い会話にしてください。
+6. ${durationGuidance}全体で ${targetChapters} のトピックチャプター（先頭の短いオープニング挨拶を含む）に編成し、各チャプターは ${turnsPerChapter} のテンポ良い会話にしてください。
 7. 音声合成（TTS）で読み上げた際に不自然にならないよう、URL文字列や絵文字はセリフに含めず、難読英単語・略語（例: Vite→ヴィート、PR→プルリクエスト、LLM→エルエルエム）を自然に読める日本語表記を \`spokenText\` に入れてください（通常の字幕表示用は \`text\`）。
 8. 出力は**必ず以下のJSONスキーマのみ**（Markdownのコードブロック装飾や前置き文なし）で返してください。
 

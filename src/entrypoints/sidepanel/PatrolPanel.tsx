@@ -1,0 +1,1072 @@
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { db } from '../../storage/db';
+import {
+  DIGEST_VERDICT_META,
+  EXTRACTION_STRATEGY_META,
+  PATROL_SOURCE_IDS,
+  SOURCE_META,
+  type CustomSiteConfig,
+  type ExtensionSettings,
+  type ExtractionStrategy,
+  type RadarItem,
+  type SourceId,
+  type TabGroupSummary,
+  type VideoDigest,
+  type WatchPlatform,
+  type WatchTarget,
+} from '../../shared/types';
+import type { RuntimeRequest } from '../../shared/messages';
+import { formatRelativeJa } from '../../shared/radar-utils';
+import { extractYouTubeVideoId } from '../../extractors/youtube';
+import { DigestCard } from './RadarPanel';
+
+interface PatrolPanelProps {
+  settings: ExtensionSettings;
+  isJobRunning: boolean;
+  tabGroups: TabGroupSummary[];
+  selectedGroupId: number | '';
+  onSelectGroupId: (id: number) => void;
+  onRefreshTabGroups: () => Promise<void>;
+  onPatchSettings: (patch: Partial<ExtensionSettings>) => Promise<void>;
+  onGoToQueue: () => void;
+  showToast: (msg: string) => void;
+  setErrorBanner: (msg: string) => void;
+}
+
+type DetailTarget =
+  | { kind: 'builtin'; sourceId: SourceId }
+  | { kind: 'custom'; siteId: string }
+  | null;
+
+const SOURCE_ICONS: Record<SourceId, string> = {
+  youtube: '📺',
+  x: '𝕏',
+  note: '📝',
+  zenn: '📘',
+  yahoo_news: '📰',
+  google_news: '🌐',
+  generic: '🔗',
+};
+
+const EMPTY_SITE_DRAFT: Omit<CustomSiteConfig, 'id'> = {
+  name: '',
+  url: '',
+  enabled: true,
+  passiveEnabled: true,
+  extractionStrategy: 'auto',
+  cssSelector: '',
+  scrollSteps: 0,
+  notes: '',
+};
+
+export function PatrolPanel({
+  settings,
+  isJobRunning,
+  tabGroups,
+  selectedGroupId,
+  onSelectGroupId,
+  onRefreshTabGroups,
+  onPatchSettings,
+  onGoToQueue,
+  showToast,
+  setErrorBanner,
+}: PatrolPanelProps) {
+  const [detail, setDetail] = useState<DetailTarget>(null);
+  const [targets, setTargets] = useState<WatchTarget[]>([]);
+  const [digests, setDigests] = useState<Map<string, VideoDigest>>(new Map());
+  const [digestProgress, setDigestProgress] = useState<Record<string, string>>({});
+  const [expandedDigest, setExpandedDigest] = useState<Record<string, boolean>>({});
+  const [focusVideoId, setFocusVideoId] = useState<string | null>(null);
+  const [lastRadarAt, setLastRadarAt] = useState<string | undefined>();
+
+  // Add source drawer state
+  const [isAddOpen, setIsAddOpen] = useState(false);
+  const [siteDraft, setSiteDraft] = useState<Omit<CustomSiteConfig, 'id'>>(EMPTY_SITE_DRAFT);
+  const [editingCustom, setEditingCustom] = useState<CustomSiteConfig | null>(null);
+
+  // Follow add input inside YouTube / X detail
+  const [followInput, setFollowInput] = useState('');
+  const [radarFilter, setRadarFilter] = useState<'all' | 'active' | 'quiet'>('all');
+
+  const reloadRadar = useCallback(async () => {
+    const [ts, ds, stored] = await Promise.all([
+      db.watchTargets.toArray(),
+      db.videoDigests.toArray(),
+      chrome.storage.local.get('agentcast_radar_last_run'),
+    ]);
+    setTargets(ts);
+    setDigests(new Map(ds.map((d) => [d.videoId, d])));
+    setLastRadarAt(stored.agentcast_radar_last_run as string | undefined);
+  }, []);
+
+  useEffect(() => {
+    void reloadRadar();
+    chrome.runtime
+      .sendMessage({ type: 'GET_DIGEST_PROGRESS' } satisfies RuntimeRequest)
+      .then((res) => {
+        if (res?.progress) setDigestProgress(res.progress);
+      })
+      .catch(() => {});
+
+    const onMsg = (msg: Record<string, unknown>) => {
+      if (msg?.type === 'RADAR_UPDATED' || msg?.type === 'JOB_FINISHED') {
+        void reloadRadar();
+      } else if (msg?.type === 'RADAR_IMPORT_DONE' && typeof msg.message === 'string') {
+        showToast(msg.message);
+        void reloadRadar();
+      } else if (msg?.type === 'RADAR_CHECK_DONE') {
+        showToast(
+          `動向チェック完了: 🟢動きあり ${msg.active} ／ ⚪動きなし ${msg.quiet}`
+        );
+      } else if (msg?.type === 'VIDEO_DIGEST_PROGRESS' && typeof msg.videoId === 'string') {
+        setDigestProgress((p) => ({ ...p, [msg.videoId as string]: String(msg.message || '') }));
+      } else if (msg?.type === 'VIDEO_DIGEST_UPDATED' && typeof msg.videoId === 'string') {
+        const vid = msg.videoId;
+        setDigestProgress((p) => {
+          const next = { ...p };
+          delete next[vid];
+          return next;
+        });
+        if (typeof msg.error === 'string') {
+          setErrorBanner(`動画要約エラー: ${msg.error}`);
+        } else {
+          setExpandedDigest((e) => ({ ...e, [vid]: true }));
+          void db.videoDigests.get(vid).then((d) => {
+            if (d) setDigests((prev) => new Map(prev).set(vid, d));
+          });
+        }
+      }
+    };
+    chrome.runtime.onMessage.addListener(onMsg);
+    return () => chrome.runtime.onMessage.removeListener(onMsg);
+  }, [reloadRadar, showToast, setErrorBanner]);
+
+  const send = async (msg: RuntimeRequest, okToast?: string) => {
+    setErrorBanner('');
+    try {
+      const res = await chrome.runtime.sendMessage(msg);
+      if (!res?.ok) setErrorBanner(res?.error || '操作に失敗しました');
+      else if (okToast) showToast(okToast);
+      return res;
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : String(err));
+      return null;
+    }
+  };
+
+  const removedSet = useMemo(
+    () => new Set(settings.removedBuiltinSources || []),
+    [settings.removedBuiltinSources]
+  );
+
+  const visibleBuiltins = useMemo(
+    () => PATROL_SOURCE_IDS.filter((id) => !removedSet.has(id)),
+    [removedSet]
+  );
+
+  const removedBuiltins = useMemo(
+    () => PATROL_SOURCE_IDS.filter((id) => removedSet.has(id)),
+    [removedSet]
+  );
+
+  const ytTargets = useMemo(() => targets.filter((t) => t.platform === 'youtube'), [targets]);
+  const xTargets = useMemo(() => targets.filter((t) => t.platform === 'x'), [targets]);
+  const ytActiveCount = ytTargets.filter((t) => t.enabled && t.status === 'active').length;
+  const xActiveCount = xTargets.filter((t) => t.enabled && t.status === 'active').length;
+  const totalActiveRadar = ytActiveCount + xActiveCount;
+
+  const totalSourceCount = visibleBuiltins.length + (settings.customSites || []).length;
+  const enabledSourceCount =
+    visibleBuiltins.filter((id) => settings.enabledSources[id]).length +
+    (settings.customSites || []).filter((s) => s.enabled).length;
+
+  const handleToggleBuiltin = async (srcId: SourceId, enabled: boolean) => {
+    await onPatchSettings({
+      enabledSources: { ...settings.enabledSources, [srcId]: enabled },
+    });
+  };
+
+  const handleRemoveBuiltin = async (srcId: SourceId) => {
+    const nextRemoved = Array.from(new Set([...(settings.removedBuiltinSources || []), srcId]));
+    await onPatchSettings({
+      removedBuiltinSources: nextRemoved,
+      enabledSources: { ...settings.enabledSources, [srcId]: false },
+    });
+    showToast(`「${SOURCE_META[srcId].shortLabel}」を巡回一覧から削除しました`);
+  };
+
+  const handleRestoreBuiltin = async (srcId: SourceId) => {
+    const nextRemoved = (settings.removedBuiltinSources || []).filter((id) => id !== srcId);
+    await onPatchSettings({
+      removedBuiltinSources: nextRemoved,
+      enabledSources: { ...settings.enabledSources, [srcId]: true },
+    });
+    showToast(`「${SOURCE_META[srcId].shortLabel}」を巡回一覧に追加しました`);
+  };
+
+  const handleToggleCustom = async (siteId: string, enabled: boolean) => {
+    const next = (settings.customSites || []).map((s) =>
+      s.id === siteId ? { ...s, enabled } : s
+    );
+    await onPatchSettings({ customSites: next });
+  };
+
+  const handleDeleteCustom = async (siteId: string) => {
+    const target = (settings.customSites || []).find((s) => s.id === siteId);
+    const next = (settings.customSites || []).filter((s) => s.id !== siteId);
+    await onPatchSettings({ customSites: next });
+    if (detail?.kind === 'custom' && detail.siteId === siteId) setDetail(null);
+    if (target) showToast(`「${target.name}」を削除しました`);
+  };
+
+  const handlePrefillActiveTab = async () => {
+    try {
+      const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!active?.url || !active.url.startsWith('http')) {
+        setErrorBanner('現在のタブは追加できないページです。');
+        return;
+      }
+      const isChangelog = /changelog|release/i.test(active.url);
+      setSiteDraft({
+        ...EMPTY_SITE_DRAFT,
+        name: (active.title || new URL(active.url).hostname).slice(0, 40),
+        url: active.url,
+        extractionStrategy: isChangelog ? 'changelog' : 'auto',
+      });
+      setIsAddOpen(true);
+    } catch {
+      setErrorBanner('現在のタブ情報を取得できませんでした。');
+    }
+  };
+
+  const handleAddCustomSite = async () => {
+    const url = siteDraft.url.trim();
+    if (!url.startsWith('http')) {
+      setErrorBanner('https:// または http:// で始まるURLを入力してください。');
+      return;
+    }
+    const name = siteDraft.name.trim() || new URL(url).hostname;
+    const newSite: CustomSiteConfig = {
+      id: `site-${Date.now()}`,
+      ...siteDraft,
+      name,
+      url,
+      cssSelector: siteDraft.cssSelector?.trim() || undefined,
+      notes: siteDraft.notes?.trim() || undefined,
+    };
+    await onPatchSettings({ customSites: [...(settings.customSites || []), newSite] });
+    setSiteDraft(EMPTY_SITE_DRAFT);
+    setIsAddOpen(false);
+    showToast(`「${name}」を巡回ソースに追加しました`);
+  };
+
+  const handleSaveCustomEdit = async () => {
+    if (!editingCustom) return;
+    const next = (settings.customSites || []).map((s) =>
+      s.id === editingCustom.id ? editingCustom : s
+    );
+    await onPatchSettings({ customSites: next });
+    showToast(`「${editingCustom.name}」の設定を保存しました`);
+    setDetail(null);
+    setEditingCustom(null);
+  };
+
+  const handleSummarize = (url: string, force = false) => {
+    const vid = extractYouTubeVideoId(url);
+    if (!vid) return;
+    if (!force && digests.has(vid)) {
+      setExpandedDigest((e) => ({ ...e, [vid]: !e[vid] }));
+      return;
+    }
+    setDigestProgress((p) => ({ ...p, [vid]: '開始中...' }));
+    void send({ type: 'SUMMARIZE_YOUTUBE_VIDEO', videoUrl: url, force });
+  };
+
+  const handleSummarizeActiveVideo = async () => {
+    const res = await send({ type: 'SUMMARIZE_ACTIVE_YOUTUBE_TAB' });
+    if (res?.ok && typeof res.videoId === 'string') {
+      setFocusVideoId(res.videoId);
+      setDigestProgress((p) => ({ ...p, [res.videoId]: '開始中...' }));
+    }
+  };
+
+  const handleAddWatchTarget = async (platform: WatchPlatform) => {
+    if (!followInput.trim()) return;
+    const res = await send(
+      { type: 'RADAR_ADD_TARGET', platform, input: followInput.trim() },
+      '監視対象に追加しました'
+    );
+    if (res?.ok) {
+      setFollowInput('');
+      void reloadRadar();
+    }
+  };
+
+  const renderRadarItem = (t: WatchTarget, item: RadarItem, isNew: boolean) => {
+    const vid = t.platform === 'youtube' ? extractYouTubeVideoId(item.url) : null;
+    const digest = vid ? digests.get(vid) : undefined;
+    const progress = vid ? digestProgress[vid] : undefined;
+    return (
+      <li key={item.id} className={`radar-item ${isNew ? 'is-new' : ''}`}>
+        <div className="radar-item-line">
+          {isNew && <span className="new-dot" aria-label="新着" />}
+          <a href={item.url} target="_blank" rel="noreferrer" className="radar-item-title">
+            {item.title || item.excerpt || '(無題)'}
+          </a>
+          <span className="radar-item-time">{formatRelativeJa(item.publishedAt)}</span>
+        </div>
+        {vid && (
+          <div className="radar-item-actions">
+            {digest && (
+              <span className={`verdict-badge verdict-${digest.verdict} is-compact`}>
+                {DIGEST_VERDICT_META[digest.verdict].emoji} {DIGEST_VERDICT_META[digest.verdict].label}
+              </span>
+            )}
+            <button
+              type="button"
+              className="btn-ghost btn-digest"
+              disabled={Boolean(progress)}
+              onClick={() => handleSummarize(item.url)}
+            >
+              {progress
+                ? `⏳ ${progress}`
+                : digest
+                  ? expandedDigest[vid]
+                    ? '要約を閉じる'
+                    : '要約を見る'
+                  : '🧠 要約して判断'}
+            </button>
+          </div>
+        )}
+        {vid && digest && expandedDigest[vid] && (
+          <DigestCard digest={digest} onRerun={() => handleSummarize(item.url, true)} />
+        )}
+      </li>
+    );
+  };
+
+  // ==================== DRILL-DOWN DETAIL VIEW ====================
+  if (detail) {
+    if (detail.kind === 'custom') {
+      const current =
+        editingCustom || (settings.customSites || []).find((s) => s.id === detail.siteId);
+      if (!current) {
+        setDetail(null);
+        return null;
+      }
+      return (
+        <section className="step-section" aria-label="カスタムソース詳細">
+          <div className="detail-nav">
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() => {
+                setDetail(null);
+                setEditingCustom(null);
+              }}
+            >
+              ← ソース一覧に戻る
+            </button>
+            <span className="pill-badge">🔗 カスタム設定</span>
+          </div>
+
+          <div className="n-primary-card">
+            <div className="card-head-row">
+              <strong>{current.name}</strong>
+              <span className="method-badge">
+                {EXTRACTION_STRATEGY_META[current.extractionStrategy].label}
+              </span>
+            </div>
+            <div className="action-row-2">
+              <button
+                type="button"
+                className="btn-primary"
+                disabled={isJobRunning}
+                onClick={() =>
+                  void send(
+                    { type: 'PATROL_CUSTOM_SITE', siteId: current.id, generateAfter: false },
+                    `${current.name} の巡回を開始しました`
+                  )
+                }
+              >
+                ▶ このソースを今すぐ巡回
+              </button>
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={isJobRunning}
+                onClick={() =>
+                  void send(
+                    { type: 'PATROL_CUSTOM_SITE', siteId: current.id, generateAfter: true },
+                    `${current.name} を即番組化します`
+                  )
+                }
+              >
+                🎙 これだけで番組化
+              </button>
+            </div>
+          </div>
+
+          <div className="n-card">
+            <div className="field-row">
+              <label className="field-label">表示名</label>
+              <input
+                className="field-input"
+                value={current.name}
+                onChange={(e) => setEditingCustom({ ...current, name: e.target.value })}
+              />
+            </div>
+            <div className="field-row">
+              <label className="field-label">対象URL</label>
+              <input
+                className="field-input"
+                value={current.url}
+                onChange={(e) => setEditingCustom({ ...current, url: e.target.value })}
+              />
+            </div>
+            <div className="field-row">
+              <label className="field-label">情報抽出の方式</label>
+              <select
+                className="field-select"
+                value={current.extractionStrategy}
+                onChange={(e) =>
+                  setEditingCustom({
+                    ...current,
+                    extractionStrategy: e.target.value as ExtractionStrategy,
+                  })
+                }
+              >
+                {(Object.keys(EXTRACTION_STRATEGY_META) as ExtractionStrategy[]).map((k) => (
+                  <option key={k} value={k}>
+                    {EXTRACTION_STRATEGY_META[k].label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            {current.extractionStrategy === 'css_selector' && (
+              <div className="field-row">
+                <label className="field-label">CSS セレクタ</label>
+                <input
+                  className="field-input"
+                  value={current.cssSelector || ''}
+                  placeholder="article, .post-card"
+                  onChange={(e) => setEditingCustom({ ...current, cssSelector: e.target.value })}
+                />
+              </div>
+            )}
+            <div className="toggle-row">
+              <span>普段の閲覧時に自動で受動ストック</span>
+              <input
+                type="checkbox"
+                checked={current.passiveEnabled}
+                onChange={(e) => setEditingCustom({ ...current, passiveEnabled: e.target.checked })}
+              />
+            </div>
+            <div className="action-row-2" style={{ marginTop: 10 }}>
+              <button type="button" className="btn-primary" onClick={() => void handleSaveCustomEdit()}>
+                変更を保存
+              </button>
+              <button
+                type="button"
+                className="btn-ghost"
+                onClick={() => void handleDeleteCustom(current.id)}
+              >
+                このソースを削除
+              </button>
+            </div>
+          </div>
+        </section>
+      );
+    }
+
+    // Built-in detail (YouTube / X / others)
+    const srcId = detail.sourceId;
+    const meta = SOURCE_META[srcId];
+    const isRadarPlatform = srcId === 'youtube' || srcId === 'x';
+    const platform: WatchPlatform | null = isRadarPlatform ? srcId : null;
+    const platformTargets = platform === 'youtube' ? ytTargets : platform === 'x' ? xTargets : [];
+    const filteredPlatformTargets = platformTargets
+      .filter((t) => {
+        if (radarFilter === 'active') return t.enabled && t.status === 'active';
+        if (radarFilter === 'quiet') return t.enabled && t.status === 'quiet';
+        return true;
+      })
+      .sort((a, b) => {
+        const score = (x: WatchTarget) => (!x.enabled ? 9 : x.status === 'active' ? 0 : x.status === 'error' ? 1 : 2);
+        return score(a) - score(b);
+      });
+    const focusDigest = focusVideoId ? digests.get(focusVideoId) : undefined;
+
+    return (
+      <section className="step-section" aria-label={`${meta.shortLabel} 詳細設定`}>
+        <div className="detail-nav">
+          <button type="button" className="btn-secondary" onClick={() => setDetail(null)}>
+            ← ソース一覧に戻る
+          </button>
+          <span className="pill-badge">
+            {SOURCE_ICONS[srcId]} {meta.shortLabel} 詳細
+          </span>
+        </div>
+
+        <div className="n-primary-card">
+          <div className="card-head-row">
+            <strong>{meta.label}</strong>
+            <span className="method-badge">{meta.extractionMethod}</span>
+          </div>
+          <p className="field-hint">{meta.description}</p>
+
+          {platform === 'youtube' && (
+            <>
+              <div className="toggle-row">
+                <span>巡回時に動きありチャンネル動向も含める</span>
+                <input
+                  type="checkbox"
+                  checked={settings.radarIncludeInPatrol}
+                  onChange={(e) =>
+                    void onPatchSettings({ radarIncludeInPatrol: e.target.checked })
+                  }
+                />
+              </div>
+              <div className="action-row-2" style={{ marginTop: 8 }}>
+                <button
+                  type="button"
+                  className="btn-primary"
+                  disabled={isJobRunning || ytTargets.length === 0}
+                  onClick={() => void send({ type: 'RADAR_CHECK', platforms: ['youtube'] })}
+                >
+                  動向をチェック
+                </button>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  disabled={isJobRunning}
+                  onClick={() => void send({ type: 'RADAR_IMPORT_YOUTUBE_SUBS' })}
+                >
+                  📺 登録chを取り込む
+                </button>
+              </div>
+              <button
+                type="button"
+                className="btn-secondary"
+                style={{ width: '100%', marginTop: 6 }}
+                onClick={() => void handleSummarizeActiveVideo()}
+              >
+                ▶ 今開いている YouTube 動画を要約して判断
+              </button>
+              {focusVideoId && digestProgress[focusVideoId] && (
+                <p className="radar-progress">⏳ {digestProgress[focusVideoId]}</p>
+              )}
+              {focusDigest && !digestProgress[focusVideoId!] && (
+                <div className="focus-digest">
+                  <p className="focus-digest-title">
+                    <a href={focusDigest.url} target="_blank" rel="noreferrer">
+                      {focusDigest.title}
+                    </a>
+                  </p>
+                  <DigestCard
+                    digest={focusDigest}
+                    onRerun={() => handleSummarize(focusDigest.url, true)}
+                  />
+                </div>
+              )}
+            </>
+          )}
+
+          {platform === 'x' && (
+            <>
+              <div className="toggle-row">
+                <span>巡回時に個別フォロー動向チェックも含める</span>
+                <input
+                  type="checkbox"
+                  checked={settings.radarIncludeInPatrol}
+                  onChange={(e) =>
+                    void onPatchSettings({ radarIncludeInPatrol: e.target.checked })
+                  }
+                />
+              </div>
+              <div className="action-row-2" style={{ marginTop: 8 }}>
+                <button
+                  type="button"
+                  className="btn-primary"
+                  disabled={isJobRunning || xTargets.filter((t) => t.enabled).length === 0}
+                  onClick={() => void send({ type: 'RADAR_CHECK', platforms: ['x'] })}
+                >
+                  フォロー動向をチェック
+                </button>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  disabled={isJobRunning}
+                  onClick={() => void send({ type: 'RADAR_IMPORT_X_FOLLOWING' })}
+                >
+                  𝕏 フォローを取り込む
+                </button>
+              </div>
+            </>
+          )}
+
+          {!platform && (
+            <button
+              type="button"
+              className="btn-primary"
+              style={{ width: '100%', marginTop: 8 }}
+              disabled={isJobRunning}
+              onClick={() =>
+                void send(
+                  { type: 'PATROL_SOURCES', sources: [srcId] },
+                  `${meta.shortLabel} を巡回しています…`
+                )
+              }
+            >
+              ▶ {meta.shortLabel} を今すぐ単体巡回
+            </button>
+          )}
+        </div>
+
+        {/* Radar Targets List inside YouTube / X detail */}
+        {platform && (
+          <div className="n-card" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div className="card-head-row">
+              <strong>
+                監視リスト（{platformTargets.filter((t) => t.enabled).length}/{platformTargets.length} ON）
+              </strong>
+              <span className="field-hint" style={{ margin: 0 }}>
+                {lastRadarAt ? `確認 ${formatRelativeJa(lastRadarAt)}` : '未チェック'}
+              </span>
+            </div>
+
+            <div className="inline-add-row">
+              <input
+                className="field-input"
+                value={followInput}
+                placeholder={
+                  platform === 'youtube'
+                    ? 'https://www.youtube.com/@handle'
+                    : '@handle または https://x.com/handle'
+                }
+                onChange={(e) => setFollowInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void handleAddWatchTarget(platform);
+                }}
+              />
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={!followInput.trim()}
+                onClick={() => void handleAddWatchTarget(platform)}
+              >
+                追加
+              </button>
+            </div>
+
+            <div className="segmented segmented-3">
+              {(['all', 'active', 'quiet'] as const).map((f) => (
+                <button
+                  key={f}
+                  type="button"
+                  className={`segment ${radarFilter === f ? 'is-active' : ''}`}
+                  onClick={() => setRadarFilter(f)}
+                >
+                  {f === 'all'
+                    ? `すべて (${platformTargets.length})`
+                    : f === 'active'
+                      ? `🟢 動きあり (${platform === 'youtube' ? ytActiveCount : xActiveCount})`
+                      : `⚪ 動きなし`}
+                </button>
+              ))}
+            </div>
+
+            {filteredPlatformTargets.length === 0 ? (
+              <p className="field-hint">該当する監視対象がありません。</p>
+            ) : (
+              <ul className="radar-list">
+                {filteredPlatformTargets.slice(0, 40).map((t) => {
+                  const newIds = new Set(
+                    t.status === 'active' ? t.latestItems.slice(0, t.newCount).map((i) => i.id) : []
+                  );
+                  return (
+                    <li key={t.id} className={`radar-target status-${t.enabled ? t.status : 'off'}`}>
+                      <div className="radar-target-head">
+                        <span className={`status-dot status-${t.enabled ? t.status : 'off'}`} />
+                        <a href={t.url} target="_blank" rel="noreferrer" className="radar-target-name">
+                          {t.name}
+                        </a>
+                        <input
+                          type="checkbox"
+                          checked={t.enabled}
+                          onChange={(e) => {
+                            void db.watchTargets.update(t.id, { enabled: e.target.checked });
+                            setTargets((prev) =>
+                              prev.map((p) => (p.id === t.id ? { ...p, enabled: e.target.checked } : p))
+                            );
+                          }}
+                        />
+                        <button
+                          type="button"
+                          className="btn-ghost"
+                          onClick={() => {
+                            void db.watchTargets.delete(t.id);
+                            setTargets((prev) => prev.filter((p) => p.id !== t.id));
+                          }}
+                        >
+                          ✕
+                        </button>
+                      </div>
+                      <p className="radar-target-status">
+                        {!t.enabled
+                          ? '監視OFF'
+                          : t.status === 'active'
+                            ? `🟢 新着 ${t.newCount} 件（${formatRelativeJa(t.lastActivityAt)}）`
+                            : t.status === 'quiet'
+                              ? `⚪ 動きなし（最終: ${formatRelativeJa(t.lastActivityAt)}）`
+                              : t.status === 'error'
+                                ? `⚠ ${t.statusMessage || '確認失敗'}`
+                                : '未チェック'}
+                      </p>
+                      {t.enabled && t.latestItems.length > 0 && (
+                        <ul className="radar-items">
+                          {t.latestItems
+                            .slice(0, t.status === 'active' ? Math.max(1, Math.min(t.newCount, 4)) : 1)
+                            .map((item) => renderRadarItem(t, item, newIds.has(item.id)))}
+                        </ul>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+
+            <button
+              type="button"
+              className="btn-secondary"
+              disabled={isJobRunning || platformTargets.length === 0}
+              onClick={() =>
+                void send({ type: 'RADAR_GENERATE_EPISODE', checkFirst: !lastRadarAt })
+              }
+            >
+              🎙 動向サマリー＋新着を番組化
+            </button>
+          </div>
+        )}
+
+        <div className="n-card">
+          <div className="field-label">抽出の仕組み</div>
+          <p className="field-hint">
+            <strong>巡回URL:</strong> {meta.startUrl}
+            <br />
+            {meta.extractionDetail}
+          </p>
+          <button
+            type="button"
+            className="btn-ghost"
+            onClick={() => {
+              void handleRemoveBuiltin(srcId);
+              setDetail(null);
+            }}
+          >
+            このソースを巡回一覧から削除
+          </button>
+        </div>
+      </section>
+    );
+  }
+
+  // ==================== MAIN FLAT SOURCE LIST VIEW ====================
+  return (
+    <section className="step-section" aria-label="STEP 2 巡回ソース">
+      {/* [1] Step Header */}
+      <div className="step-header">
+        <div>
+          <div className="step-kicker">STEP 2 / SOURCES &amp; PATROL</div>
+          <h2 className="step-title">巡回ソース管理と収集実行</h2>
+        </div>
+        <span className="mono-pill">
+          {enabledSourceCount}/{totalSourceCount} ON
+        </span>
+      </div>
+
+      {/* [2] Primary Action Card */}
+      <div className="n-primary-card">
+        <div className="card-head-row">
+          <strong>📡 有効なソースを巡回してキューへ</strong>
+          {totalActiveRadar > 0 && (
+            <span className="pill-badge is-sage">動きあり {totalActiveRadar}</span>
+          )}
+        </div>
+        <p className="field-hint" style={{ marginTop: 4 }}>
+          有効なソースから最新情報だけを集め、自動で <strong>STEP 3 キュー</strong> に投入します。
+        </p>
+        <button
+          id="btn-patrol-to-queue"
+          type="button"
+          className="btn-primary"
+          style={{ width: '100%', marginTop: 8 }}
+          disabled={isJobRunning}
+          onClick={() => {
+            void send({ type: 'PATROL_SOURCES' }, '巡回を開始しました。集まった素材はキューに入ります');
+          }}
+        >
+          ▶ 今すぐ巡回を実行してキューへ送る
+        </button>
+        <div className="action-row-2" style={{ marginTop: 6 }}>
+          <button
+            type="button"
+            className="btn-secondary"
+            disabled={isJobRunning}
+            onClick={async () => {
+              const res = await send({ type: 'CAPTURE_ACTIVE_TAB' });
+              if (res?.ok) {
+                showToast(`今のタブから ${res.inserted} 件をキューに追加しました`);
+                onGoToQueue();
+              }
+            }}
+          >
+            ＋ 今のタブを取り込む
+          </button>
+          <button
+            type="button"
+            className="btn-secondary"
+            disabled={isJobRunning}
+            onClick={() =>
+              void send(
+                { type: 'CAPTURE_AND_GENERATE_ACTIVE_TAB' },
+                '今のタブだけで番組を作成します'
+              )
+            }
+          >
+            ⚡ 今のタブを即番組化
+          </button>
+        </div>
+        {tabGroups.length > 0 && (
+          <div className="tabgroup-inline">
+            <select
+              className="field-select"
+              value={selectedGroupId}
+              onChange={(e) => onSelectGroupId(Number(e.target.value))}
+              aria-label="取り込むタブグループ"
+            >
+              {tabGroups.map((g) => (
+                <option key={g.id} value={g.id}>
+                  📁 {g.title} ({g.tabCount}タブ)
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              className="btn-secondary"
+              disabled={isJobRunning || selectedGroupId === ''}
+              onClick={() => {
+                if (selectedGroupId === '') return;
+                void send(
+                  { type: 'PATROL_TAB_GROUP', groupId: selectedGroupId, generateAfter: false },
+                  'タブグループの巡回を開始しました'
+                );
+              }}
+            >
+              キューへ
+            </button>
+            <button
+              type="button"
+              className="btn-ghost"
+              onClick={() => void onRefreshTabGroups()}
+              title="タブグループ一覧を更新"
+            >
+              ↻
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* [3] Flat Unified Source List */}
+      <div className="list-head-row">
+        <span className="section-label">巡回ソース一覧（フラット管理）</span>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <button type="button" className="btn-ghost" onClick={() => void handlePrefillActiveTab()}>
+            ＋ 今のタブを登録
+          </button>
+          <button
+            type="button"
+            className="btn-ghost is-accent"
+            onClick={() => setIsAddOpen((v) => !v)}
+          >
+            {isAddOpen ? '閉じる' : '＋ ソース追加'}
+          </button>
+        </div>
+      </div>
+
+      {isAddOpen && (
+        <div className="n-card" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div className="field-row">
+            <label className="field-label">サイト名（任意）</label>
+            <input
+              className="field-input"
+              value={siteDraft.name}
+              placeholder="例: Antigravity Changelog"
+              onChange={(e) => setSiteDraft({ ...siteDraft, name: e.target.value })}
+            />
+          </div>
+          <div className="field-row">
+            <label className="field-label">URL / RSSフィード</label>
+            <input
+              className="field-input"
+              value={siteDraft.url}
+              placeholder="https://..."
+              onChange={(e) => setSiteDraft({ ...siteDraft, url: e.target.value })}
+            />
+          </div>
+          <div className="field-row">
+            <label className="field-label">抽出方式</label>
+            <select
+              className="field-select"
+              value={siteDraft.extractionStrategy}
+              onChange={(e) =>
+                setSiteDraft({
+                  ...siteDraft,
+                  extractionStrategy: e.target.value as ExtractionStrategy,
+                })
+              }
+            >
+              {(Object.keys(EXTRACTION_STRATEGY_META) as ExtractionStrategy[]).map((k) => (
+                <option key={k} value={k}>
+                  {EXTRACTION_STRATEGY_META[k].label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <button
+            type="button"
+            className="btn-primary"
+            onClick={() => void handleAddCustomSite()}
+          >
+            このソースを追加
+          </button>
+
+          {removedBuiltins.length > 0 && (
+            <div className="preset-restore">
+              <div className="field-label">削除済みプリセットを復元</div>
+              <div className="preset-chips">
+                {removedBuiltins.map((id) => (
+                  <button
+                    key={id}
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => void handleRestoreBuiltin(id)}
+                  >
+                    ＋ {SOURCE_ICONS[id]} {SOURCE_META[id].shortLabel}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="flat-source-list">
+        {visibleBuiltins.map((srcId) => {
+          const meta = SOURCE_META[srcId];
+          const enabled = Boolean(settings.enabledSources[srcId]);
+          const badge =
+            srcId === 'youtube' && ytActiveCount > 0
+              ? `動きあり ${ytActiveCount}`
+              : srcId === 'x' && xActiveCount > 0
+                ? `動きあり ${xActiveCount}`
+                : null;
+          const summary =
+            srcId === 'youtube'
+              ? ytTargets.length > 0
+                ? `登録 ${ytTargets.length}ch ・ 動きあり ${ytActiveCount} ・ 動画要約対応`
+                : meta.description
+              : srcId === 'x' && xTargets.length > 0
+                ? `タイムライン ＋ 監視 ${xTargets.filter((t) => t.enabled).length}人（動きあり ${xActiveCount}）`
+                : meta.description;
+
+          return (
+            <div key={srcId} className={`flat-source-row ${enabled ? '' : 'is-off'}`}>
+              <input
+                type="checkbox"
+                checked={enabled}
+                onChange={(e) => void handleToggleBuiltin(srcId, e.target.checked)}
+                aria-label={`${meta.shortLabel} を巡回対象にする`}
+              />
+              <button
+                type="button"
+                className="flat-source-body"
+                onClick={() => setDetail({ kind: 'builtin', sourceId: srcId })}
+              >
+                <div className="flat-source-top">
+                  <span>{SOURCE_ICONS[srcId]}</span>
+                  <span className="flat-source-name">{meta.shortLabel}</span>
+                  {badge && <span className="pill-badge is-sage">{badge}</span>}
+                </div>
+                <div className="flat-source-sub">{summary}</div>
+              </button>
+              <button
+                type="button"
+                className="btn-secondary btn-compact"
+                onClick={() => setDetail({ kind: 'builtin', sourceId: srcId })}
+              >
+                詳細 ›
+              </button>
+              <button
+                type="button"
+                className="btn-ghost"
+                onClick={() => void handleRemoveBuiltin(srcId)}
+                title="一覧から削除"
+                aria-label={`${meta.shortLabel} を削除`}
+              >
+                ✕
+              </button>
+            </div>
+          );
+        })}
+
+        {(settings.customSites || []).map((site) => (
+          <div key={site.id} className={`flat-source-row ${site.enabled ? '' : 'is-off'}`}>
+            <input
+              type="checkbox"
+              checked={site.enabled}
+              onChange={(e) => void handleToggleCustom(site.id, e.target.checked)}
+              aria-label={`${site.name} を巡回対象にする`}
+            />
+            <button
+              type="button"
+              className="flat-source-body"
+              onClick={() => {
+                setEditingCustom({ ...site });
+                setDetail({ kind: 'custom', siteId: site.id });
+              }}
+            >
+              <div className="flat-source-top">
+                <span>🔗</span>
+                <span className="flat-source-name">{site.name}</span>
+                <span className="method-badge">
+                  {EXTRACTION_STRATEGY_META[site.extractionStrategy].label}
+                </span>
+              </div>
+              <div className="flat-source-sub">{site.url}</div>
+            </button>
+            <button
+              type="button"
+              className="btn-secondary btn-compact"
+              onClick={() => {
+                setEditingCustom({ ...site });
+                setDetail({ kind: 'custom', siteId: site.id });
+              }}
+            >
+              詳細 ›
+            </button>
+            <button
+              type="button"
+              className="btn-ghost"
+              onClick={() => void handleDeleteCustom(site.id)}
+              title="削除"
+              aria-label={`${site.name} を削除`}
+            >
+              ✕
+            </button>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}

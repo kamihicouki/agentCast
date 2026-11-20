@@ -29,7 +29,12 @@ export type RuntimeRequest =
   | { type: 'PATROL_CUSTOM_SITE'; siteId: string; generateAfter?: boolean }
   | { type: 'LIST_TAB_GROUPS' }
   | { type: 'PATROL_TAB_GROUP'; groupId: number; generateAfter?: boolean }
-  | { type: 'GENERATE_EPISODE_FROM_QUEUE' }
+  | {
+      type: 'GENERATE_EPISODE_FROM_QUEUE';
+      itemIds?: string[];
+      durationMin?: number;
+      durationMode?: 'fixed' | 'auto';
+    }
   | { type: 'DELETE_EPISODE'; episodeId: string }
   | { type: 'CLEANUP_STALE_EPISODES' }
   | { type: 'GET_JOB_STATUS' }

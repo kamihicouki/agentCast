@@ -1,6 +1,6 @@
 {
   "name": "agent-cast",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "private": true,
   "description": "Personal AI Podcast Chrome Extension powered by your own browser sessions",
   "type": "module",
@@ -8,6 +8,7 @@
     "dev": "node scripts/build-extension.mjs --watch",
     "build": "node scripts/build-extension.mjs",
     "build:prod": "BUILD_TARGET=production node scripts/build-extension.mjs",
+    "package:cws": "node scripts/package-cws.mjs",
     "sync:gdrive": "node scripts/build-extension.mjs && node scripts/sync-gdrive.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"

@@ -62,6 +62,9 @@ export async function getSettings(): Promise<ExtensionSettings> {
         ...(saved?.enabledSources ?? {}),
       },
       customSites: Array.isArray(saved?.customSites) ? saved.customSites : [],
+      removedBuiltinSources: Array.isArray(saved?.removedBuiltinSources)
+        ? saved.removedBuiltinSources
+        : [],
       publish: {
         ...DEFAULT_PUBLISH_SETTINGS,
         ...(saved?.publish ?? {}),
@@ -83,6 +86,9 @@ export async function saveSettings(partial: Partial<ExtensionSettings>): Promise
     customSites: Array.isArray(partial.customSites)
       ? partial.customSites
       : current.customSites || [],
+    removedBuiltinSources: Array.isArray(partial.removedBuiltinSources)
+      ? partial.removedBuiltinSources
+      : current.removedBuiltinSources || [],
     publish: {
       ...current.publish,
       ...(partial.publish ?? {}),

@@ -195,12 +195,16 @@ function generateManifest() {
           },
         ]
       : [],
-    web_accessible_resources: [
-      {
-        resources: ['build-meta.json'],
-        matches: ['<all_urls>'],
-      },
-    ],
+    ...(isPersonalMain
+      ? {
+          web_accessible_resources: [
+            {
+              resources: ['build-meta.json'],
+              matches: ['<all_urls>'],
+            },
+          ],
+        }
+      : {}),
   };
 
   fs.writeFileSync(path.join(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2));

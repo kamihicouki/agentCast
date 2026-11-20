@@ -441,9 +441,10 @@ async function patrolSources(requestedSources?: SourceId[]): Promise<{
   warnings: string[];
 }> {
   const settings = await getSettings();
+  const removedSet = new Set(settings.removedBuiltinSources || []);
   const targetSources: SourceId[] =
     requestedSources ||
-    PATROL_SOURCE_IDS.filter((s) => settings.enabledSources[s]);
+    PATROL_SOURCE_IDS.filter((s) => settings.enabledSources[s] && !removedSet.has(s));
 
   let totalInserted = 0;
   const warnings: string[] = [];
@@ -708,9 +709,15 @@ async function loadRecentTopicDigests(limit = 8, maxDays = 7): Promise<RecentTop
 }
 
 async function generateEpisodeFromItems(
-  explicitItems?: FeedItem[]
+  explicitItems?: FeedItem[],
+  overrides?: { durationMin?: number; durationMode?: 'fixed' | 'auto' }
 ): Promise<PodcastEpisode> {
-  const settings = await getSettings();
+  const baseSettings = await getSettings();
+  const settings: ExtensionSettings = {
+    ...baseSettings,
+    targetDurationMin: overrides?.durationMin ?? baseSettings.targetDurationMin,
+    durationMode: overrides?.durationMode ?? baseSettings.durationMode,
+  };
   const isExplicit = Boolean(explicitItems && explicitItems.length > 0);
   const rawQueueItems = isExplicit
     ? explicitItems!
@@ -1099,9 +1106,20 @@ chrome.runtime.onMessage.addListener((message: RuntimeRequest, _sender, sendResp
         return false;
       }
       sendResponse({ ok: true, started: true });
-      void runBackgroundJob('フォロー中サイトを巡回中...', async () => {
+      void runBackgroundJob('有効な巡回ソースを巡回してキューへ追加中...', async () => {
         const res = await patrolSources(message.sources);
-        return { warnings: res.warnings };
+        const warnings = [...res.warnings];
+        const settings = await getSettings();
+        if (!message.sources && settings.radarIncludeInPatrol) {
+          try {
+            const radar = await runRadarCheck(radarDeps);
+            warnings.push(...radar.warnings);
+            await ingestRadarCandidates();
+          } catch (err) {
+            warnings.push(`フォロー動向: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+        return { warnings };
       });
       return false;
 
@@ -1111,8 +1129,18 @@ chrome.runtime.onMessage.addListener((message: RuntimeRequest, _sender, sendResp
         return false;
       }
       sendResponse({ ok: true, started: true });
-      void runBackgroundJob('未読キューから番組台本を構成中...', async () => {
-        await generateEpisodeFromItems();
+      void runBackgroundJob('キューの素材から番組台本を構成中...', async () => {
+        let explicit: FeedItem[] | undefined;
+        if (Array.isArray(message.itemIds) && message.itemIds.length > 0) {
+          const picked = (await db.feedItems.bulkGet(message.itemIds)).filter(
+            (i): i is FeedItem => Boolean(i)
+          );
+          if (picked.length > 0) explicit = picked;
+        }
+        await generateEpisodeFromItems(explicit, {
+          durationMin: message.durationMin,
+          durationMode: message.durationMode,
+        });
       });
       return false;
 
