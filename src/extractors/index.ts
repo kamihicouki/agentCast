@@ -10,6 +10,7 @@ import { extractGoogleNews } from './google-news';
 import { extractChangelog, isChangelogPage } from './changelog';
 import { extractGenericReadability } from './generic-readability';
 import { extractByCssSelector, parseGenericRssOrAtomXml } from './custom-site';
+import { extractYouTube } from './youtube';
 
 export function extractFromDocument(
   doc: Document,
@@ -66,6 +67,9 @@ export function extractFromDocument(
       case 'google_news':
         candidates = extractGoogleNews(doc, pageUrl);
         break;
+      case 'youtube':
+        candidates = extractYouTube(doc, pageUrl);
+        break;
       default:
         candidates = extractGenericReadability(doc, pageUrl);
         break;
@@ -73,7 +77,12 @@ export function extractFromDocument(
   }
 
   // Fallback to Readability if a specific site page didn't match timeline selectors
-  if (candidates.length === 0 && source !== 'x' && source !== 'google_news') {
+  if (
+    candidates.length === 0 &&
+    source !== 'x' &&
+    source !== 'google_news' &&
+    source !== 'youtube'
+  ) {
     candidates = extractGenericReadability(doc, pageUrl);
   }
 
@@ -89,6 +98,7 @@ export {
   extractZenn,
   extractYahooNews,
   extractGoogleNews,
+  extractYouTube,
   extractChangelog,
   extractGenericReadability,
   extractByCssSelector,

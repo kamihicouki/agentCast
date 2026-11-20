@@ -55,6 +55,37 @@ export async function generateScriptWithGemini(
   return parseGeneratedScriptJson(textOut, items, settings);
 }
 
+/**
+ * Generic JSON-mode request. `extraParts` lets callers attach e.g.
+ * `{ fileData: { fileUri: 'https://www.youtube.com/watch?v=…' } }` for native video understanding.
+ */
+export async function generateTextWithGemini(
+  prompt: string,
+  settings: ExtensionSettings,
+  extraParts: Record<string, unknown>[] = []
+): Promise<string> {
+  const apiKey = settings.geminiApiKey.trim();
+  if (!apiKey) throw new Error('Gemini APIキーが未設定です。');
+  const model = settings.geminiModel.trim() || 'gemini-flash-latest';
+  const response = await fetch(`${GEMINI_API_BASE}/${encodeURIComponent(model)}:generateContent`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
+    body: JSON.stringify({
+      contents: [{ role: 'user', parts: [...extraParts, { text: prompt }] }],
+      generationConfig: { responseMimeType: 'application/json', temperature: 0.3 },
+    }),
+  });
+  if (!response.ok) {
+    const errBody = await response.text();
+    throw new Error(`Gemini APIエラー (${response.status}): ${errBody.slice(0, 200)}`);
+  }
+  const data = await response.json();
+  const textOut: string =
+    data?.candidates?.[0]?.content?.parts?.map((p: { text?: string }) => p.text || '').join('') || '';
+  if (!textOut) throw new Error('Gemini APIから空のレスポンスが返されました。');
+  return textOut;
+}
+
 async function requestGeminiTtsModel(
   apiKey: string,
   modelId: string,

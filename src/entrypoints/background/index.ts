@@ -9,6 +9,7 @@ import {
 } from '../../storage/db';
 import {
   INITIAL_PLAYBACK_STATE,
+  PATROL_SOURCE_IDS,
   SOURCE_META,
   type CustomSiteConfig,
   type ExtractedCandidate,
@@ -49,6 +50,19 @@ import {
   injectXPublishHelper,
   injectYouTubePublishHelper,
 } from '../../providers/personal-only/publish-helpers';
+import { runPromptViaWebSession } from '../../providers/personal-only/web-llm-bridge';
+import { generateTextWithGemini } from '../../providers/gemini-api';
+import { generateTextWithOpenAI } from '../../providers/openai-api';
+import { summarizeYouTubeVideo, type DigestLlmRunner } from '../../providers/video-digest';
+import { extractYouTubeVideoId } from '../../extractors/youtube';
+import {
+  addWatchTarget,
+  buildRadarCandidates,
+  importXFollowing,
+  importYouTubeSubscriptions,
+  runRadarCheck,
+  type RadarDeps,
+} from './radar';
 
 const ALARM_MORNING_CAST = 'agentcast_scheduled_generation';
 const PATROL_GROUP_TITLE = 'agentCast 巡回中';
@@ -58,6 +72,8 @@ let latestPlaybackState: PlaybackState = { ...INITIAL_PLAYBACK_STATE };
 let isJobRunning = false;
 let currentJobMessage = '';
 let lastJobError = '';
+/** videoId → progress message for in-flight YouTube digests (not exclusive with patrol jobs). */
+const digestInProgress = new Map<string, string>();
 
 // Open Side Panel automatically when clicking the toolbar icon
 chrome.sidePanel
@@ -65,7 +81,9 @@ chrome.sidePanel
   .catch((err) => console.warn('[agentCast] sidePanel.setPanelBehavior warning:', err));
 
 // Guard Dev Auto-Reloader during BOTH audio playback AND active generation jobs!
-startDevAutoReloader(() => latestPlaybackState.isPlaying || isJobRunning);
+startDevAutoReloader(
+  () => latestPlaybackState.isPlaying || isJobRunning || digestInProgress.size > 0
+);
 
 /**
  * Marks any orphaned "generating_script / synthesizing_audio / collecting" episodes left behind
@@ -421,9 +439,7 @@ async function patrolSources(requestedSources?: SourceId[]): Promise<{
   const settings = await getSettings();
   const targetSources: SourceId[] =
     requestedSources ||
-    (['x', 'note', 'zenn', 'yahoo_news', 'google_news'] as SourceId[]).filter(
-      (s) => settings.enabledSources[s]
-    );
+    PATROL_SOURCE_IDS.filter((s) => settings.enabledSources[s]);
 
   let totalInserted = 0;
   const warnings: string[] = [];
@@ -474,9 +490,11 @@ async function patrolSources(requestedSources?: SourceId[]): Promise<{
 
         await chrome.tabs.update(patrolTabId, { url: meta.startUrl });
         await waitForTabReady(patrolTabId, 16000);
-        await sleep(source === 'x' || source === 'google_news' ? 2400 : 1500);
+        await sleep(
+          source === 'x' || source === 'google_news' || source === 'youtube' ? 2400 : 1500
+        );
 
-        const scrollSteps = source === 'x' ? 2 : source === 'note' ? 1 : 0;
+        const scrollSteps = source === 'x' ? 2 : source === 'note' || source === 'youtube' ? 1 : 0;
         const extracted = await extractFromTab(patrolTabId, scrollSteps);
 
         if (extracted.blocked) {
@@ -820,8 +838,127 @@ async function patrolAndGenerateEpisode(sources?: SourceId[]): Promise<{
   warnings: string[];
 }> {
   const patrolRes = await patrolSources(sources);
+  const warnings = [...patrolRes.warnings];
+  const settings = await getSettings();
+  if (settings.radarIncludeInPatrol && !sources) {
+    try {
+      const radar = await runRadarCheck(radarDeps);
+      warnings.push(...radar.warnings);
+      await ingestRadarCandidates();
+    } catch (err) {
+      warnings.push(`動向レーダー: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
   await generateEpisodeFromItems();
-  return { warnings: patrolRes.warnings };
+  return { warnings };
+}
+
+// ---------------------------------------------------------------------------
+// Follow radar + video digests (v0.4.0)
+// ---------------------------------------------------------------------------
+
+async function openGroupedPatrolTab(url: string): Promise<number> {
+  const tab = await chrome.tabs.create({ url, active: false });
+  if (!tab.id) throw new Error('巡回タブを作成できませんでした。');
+  if (chrome.tabs.group && chrome.tabGroups?.update) {
+    try {
+      const groupId = await chrome.tabs.group({ tabIds: [tab.id] });
+      await chrome.tabGroups.update(groupId, {
+        title: PATROL_GROUP_TITLE,
+        color: 'orange',
+        collapsed: false,
+      });
+    } catch {
+      // Ignore (popup / incognito windows)
+    }
+  }
+  return tab.id;
+}
+
+const radarDeps: RadarDeps = {
+  updateJobProgress,
+  broadcastEvent,
+  openPatrolTab: openGroupedPatrolTab,
+  waitForTabReady,
+  extractFromTab: (tabId, scrollSteps) => extractFromTab(tabId, scrollSteps ?? 0),
+};
+
+async function ingestRadarCandidates(): Promise<FeedItem[]> {
+  const targets = await db.watchTargets.toArray();
+  const digests = new Map((await db.videoDigests.toArray()).map((d) => [d.videoId, d]));
+  const candidates = buildRadarCandidates(targets, digests);
+  if (candidates.length === 0) return [];
+  const saved = await ingestCandidates(candidates);
+  broadcastEvent({ type: 'QUEUE_UPDATED' });
+  return saved.items;
+}
+
+function buildDigestLlmRunner(settings: ExtensionSettings): DigestLlmRunner | null {
+  const hasGemini = Boolean(settings.geminiApiKey.trim());
+  const hasOpenAI = Boolean(settings.openaiApiKey.trim());
+  const gemini: DigestLlmRunner = (prompt, opts) =>
+    generateTextWithGemini(
+      prompt,
+      settings,
+      opts.useVideoInput && opts.videoUrl ? [{ fileData: { fileUri: opts.videoUrl } }] : []
+    );
+  const openai: DigestLlmRunner = (prompt) => generateTextWithOpenAI(prompt, settings);
+
+  if (settings.aiMode === 'gemini_api' && hasGemini) return gemini;
+  if (settings.aiMode === 'openai_api' && hasOpenAI) return openai;
+  if (settings.aiMode === 'web_chatgpt' || settings.aiMode === 'web_gemini') {
+    if (hasGemini) return gemini; // API is faster than driving a web tab per video
+    if (__AGENTCAST_TARGET__ === 'main') {
+      const provider = settings.aiMode === 'web_chatgpt' ? 'chatgpt' : 'gemini';
+      return (prompt) => runPromptViaWebSession(provider, prompt);
+    }
+  }
+  if (hasGemini) return gemini;
+  if (hasOpenAI) return openai;
+  return null;
+}
+
+function startVideoDigest(videoUrl: string, force = false): string {
+  const videoId = extractYouTubeVideoId(videoUrl);
+  if (!videoId) throw new Error('YouTube動画のURLではありません。');
+  if (digestInProgress.has(videoId)) return videoId;
+
+  digestInProgress.set(videoId, '準備中...');
+  broadcastEvent({ type: 'VIDEO_DIGEST_PROGRESS', videoId, message: '準備中...' });
+
+  void withServiceWorkerKeepAlive(async () => {
+    try {
+      if (!force) {
+        const cached = await db.videoDigests.get(videoId);
+        if (cached) {
+          broadcastEvent({ type: 'VIDEO_DIGEST_UPDATED', videoId });
+          return;
+        }
+      }
+      const settings = await getSettings();
+      const digest = await summarizeYouTubeVideo(
+        videoUrl,
+        settings,
+        buildDigestLlmRunner(settings),
+        (message) => {
+          digestInProgress.set(videoId, message);
+          broadcastEvent({ type: 'VIDEO_DIGEST_PROGRESS', videoId, message });
+        }
+      );
+      await db.videoDigests.put(digest);
+      broadcastEvent({ type: 'VIDEO_DIGEST_UPDATED', videoId });
+    } catch (err) {
+      broadcastEvent({
+        type: 'VIDEO_DIGEST_UPDATED',
+        videoId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      digestInProgress.delete(videoId);
+    }
+  });
+
+  return videoId;
 }
 
 async function playEpisodeInOffscreen(
@@ -1121,6 +1258,106 @@ chrome.runtime.onMessage.addListener((message: RuntimeRequest, _sender, sendResp
     case 'CLEAR_PENDING_PUBLISH_JOB':
       pendingPublishJob = null;
       sendResponse({ ok: true });
+      return false;
+
+    case 'RADAR_CHECK':
+      if (isJobRunning) {
+        sendResponse({ ok: false, error: '現在別の巡回・番組生成が実行中です。' });
+        return false;
+      }
+      sendResponse({ ok: true, started: true });
+      void runBackgroundJob('登録チャンネル・フォロー動向をチェック中...', async () => {
+        const res = await runRadarCheck(radarDeps, { platforms: message.platforms });
+        broadcastEvent({ type: 'RADAR_CHECK_DONE', ...res });
+        return { warnings: res.warnings };
+      });
+      return false;
+
+    case 'RADAR_IMPORT_YOUTUBE_SUBS':
+      if (isJobRunning) {
+        sendResponse({ ok: false, error: '現在別の巡回・番組生成が実行中です。' });
+        return false;
+      }
+      sendResponse({ ok: true, started: true });
+      void runBackgroundJob('YouTube 登録チャンネルを取り込み中...', async () => {
+        const res = await importYouTubeSubscriptions(radarDeps);
+        broadcastEvent({
+          type: 'RADAR_IMPORT_DONE',
+          message: `YouTube 登録チャンネル ${res.total} 件中 ${res.added} 件を追加しました。`,
+        });
+      });
+      return false;
+
+    case 'RADAR_IMPORT_X_FOLLOWING':
+      if (isJobRunning) {
+        sendResponse({ ok: false, error: '現在別の巡回・番組生成が実行中です。' });
+        return false;
+      }
+      sendResponse({ ok: true, started: true });
+      void runBackgroundJob('X のフォロー一覧を取り込み中...', async () => {
+        const res = await importXFollowing(radarDeps, message.maxCount ?? 300);
+        broadcastEvent({
+          type: 'RADAR_IMPORT_DONE',
+          message: `@${res.handle} のフォロー ${res.total} 件中 ${res.added} 件を追加しました（X は初期状態でOFF。監視したい人だけONにしてください）。`,
+        });
+      });
+      return false;
+
+    case 'RADAR_ADD_TARGET':
+      void addWatchTarget(message.platform, message.input, message.name)
+        .then((target) => {
+          broadcastEvent({ type: 'RADAR_UPDATED' });
+          sendResponse({ ok: true, target });
+        })
+        .catch((err: unknown) =>
+          sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) })
+        );
+      return true;
+
+    case 'RADAR_GENERATE_EPISODE':
+      if (isJobRunning) {
+        sendResponse({ ok: false, error: '現在別の巡回・番組生成が実行中です。' });
+        return false;
+      }
+      sendResponse({ ok: true, started: true });
+      void runBackgroundJob('フォロー動向から番組を編成中...', async () => {
+        const warnings: string[] = [];
+        if (message.checkFirst) {
+          const res = await runRadarCheck(radarDeps);
+          warnings.push(...res.warnings);
+        }
+        const items = await ingestRadarCandidates();
+        if (items.length === 0) {
+          throw new Error('動向データがありません。先に「動向をチェック」を実行してください。');
+        }
+        await generateEpisodeFromItems(items);
+        return { warnings };
+      });
+      return false;
+
+    case 'SUMMARIZE_YOUTUBE_VIDEO':
+      try {
+        const videoId = startVideoDigest(message.videoUrl, message.force);
+        sendResponse({ ok: true, videoId });
+      } catch (err) {
+        sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      }
+      return false;
+
+    case 'SUMMARIZE_ACTIVE_YOUTUBE_TAB':
+      void (async () => {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!tab?.url || !extractYouTubeVideoId(tab.url)) {
+          sendResponse({ ok: false, error: '現在のタブで YouTube 動画を開いてから実行してください。' });
+          return;
+        }
+        const videoId = startVideoDigest(tab.url, true);
+        sendResponse({ ok: true, videoId, url: tab.url });
+      })();
+      return true;
+
+    case 'GET_DIGEST_PROGRESS':
+      sendResponse({ ok: true, progress: Object.fromEntries(digestInProgress) });
       return false;
 
     default:

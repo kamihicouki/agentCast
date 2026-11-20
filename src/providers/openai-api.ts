@@ -57,6 +57,35 @@ export async function generateScriptWithOpenAI(
   return parseGeneratedScriptJson(content, items, settings);
 }
 
+export async function generateTextWithOpenAI(
+  prompt: string,
+  settings: ExtensionSettings
+): Promise<string> {
+  const apiKey = settings.openaiApiKey.trim();
+  if (!apiKey) throw new Error('OpenAI APIキーが未設定です。');
+  const response = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify({
+      model: settings.openaiModel.trim() || 'gpt-4o-mini',
+      response_format: { type: 'json_object' },
+      temperature: 0.3,
+      messages: [
+        { role: 'system', content: 'あなたはJSONのみを出力する日本語アシスタントです。' },
+        { role: 'user', content: prompt },
+      ],
+    }),
+  });
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`OpenAI APIエラー (${response.status}): ${errText.slice(0, 200)}`);
+  }
+  const data = await response.json();
+  const content: string = data?.choices?.[0]?.message?.content || '';
+  if (!content) throw new Error('OpenAI APIから空のレスポンスが返されました。');
+  return content;
+}
+
 export async function synthesizeChapterWithOpenAITts(
   chapter: EpisodeChapter,
   settings: ExtensionSettings

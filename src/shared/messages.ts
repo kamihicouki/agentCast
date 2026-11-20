@@ -62,7 +62,15 @@ export type RuntimeRequest =
   | { type: 'VERIFY_GEMINI_KEY'; apiKey?: string }
   | { type: 'START_PUBLISH_JOB'; job: PendingPublishJob }
   | { type: 'GET_PENDING_PUBLISH_JOB' }
-  | { type: 'CLEAR_PENDING_PUBLISH_JOB' };
+  | { type: 'CLEAR_PENDING_PUBLISH_JOB' }
+  | { type: 'RADAR_CHECK'; platforms?: ('youtube' | 'x')[] }
+  | { type: 'RADAR_IMPORT_YOUTUBE_SUBS' }
+  | { type: 'RADAR_IMPORT_X_FOLLOWING'; maxCount?: number }
+  | { type: 'RADAR_ADD_TARGET'; platform: 'youtube' | 'x'; input: string; name?: string }
+  | { type: 'RADAR_GENERATE_EPISODE'; checkFirst?: boolean }
+  | { type: 'SUMMARIZE_YOUTUBE_VIDEO'; videoUrl: string; force?: boolean }
+  | { type: 'SUMMARIZE_ACTIVE_YOUTUBE_TAB' }
+  | { type: 'GET_DIGEST_PROGRESS' };
 
 export interface PendingPublishJob {
   id: string;

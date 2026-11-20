@@ -6,6 +6,8 @@ import {
   type ExtensionSettings,
   type FeedItem,
   type PodcastEpisode,
+  type VideoDigest,
+  type WatchTarget,
 } from '../shared/types';
 import { canonicalizeUrl, computeItemId, makeExcerpt } from '../shared/url-utils';
 
@@ -23,6 +25,8 @@ class AgentCastDatabase extends Dexie {
   feedItems!: Table<FeedItem, string>;
   episodes!: Table<PodcastEpisode, string>;
   chapterAudio!: Table<ChapterAudioRecord, string>;
+  watchTargets!: Table<WatchTarget, string>;
+  videoDigests!: Table<VideoDigest, string>;
 
   constructor() {
     super('agentCastDB');
@@ -30,6 +34,14 @@ class AgentCastDatabase extends Dexie {
       feedItems: 'id, canonicalUrl, source, capturedAt, consumedInEpisodeId',
       episodes: 'id, createdAt, status',
       chapterAudio: 'chapterKey, episodeId, chapterIndex',
+    });
+    // v0.4.0: follow radar targets + per-video digests
+    this.version(2).stores({
+      feedItems: 'id, canonicalUrl, source, capturedAt, consumedInEpisodeId',
+      episodes: 'id, createdAt, status',
+      chapterAudio: 'chapterKey, episodeId, chapterIndex',
+      watchTargets: 'id, platform, enabled, status',
+      videoDigests: 'videoId, createdAt',
     });
   }
 }

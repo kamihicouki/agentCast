@@ -4,6 +4,7 @@ import {
   DEFAULT_SETTINGS,
   EXTRACTION_STRATEGY_META,
   INITIAL_PLAYBACK_STATE,
+  PATROL_SOURCE_IDS,
   SOURCE_META,
   type BuildMeta,
   type CustomSiteConfig,
@@ -30,8 +31,9 @@ import {
   buildYouTubeStudioUploadUrl,
   renderEpisodeToMp4,
 } from '../../shared/publish-utils';
+import { RadarPanel } from './RadarPanel';
 
-type ActiveTab = 'player' | 'queue' | 'settings';
+type ActiveTab = 'player' | 'radar' | 'queue' | 'settings';
 
 const SPEED_STEPS = [1.0, 1.25, 1.5, 1.75, 2.0];
 const GEMINI_VOICES = ['Puck', 'Aoede', 'Kore', 'Charon', 'Fenrir', 'Leda'];
@@ -921,12 +923,20 @@ export function App() {
             再生・台本
           </button>
           <button
+            id="tab-radar"
+            type="button"
+            className={`nav-tab ${tab === 'radar' ? 'is-active' : ''}`}
+            onClick={() => setTab('radar')}
+          >
+            動向
+          </button>
+          <button
             id="tab-queue"
             type="button"
             className={`nav-tab ${tab === 'queue' ? 'is-active' : ''}`}
             onClick={() => setTab('queue')}
           >
-            未読キュー ({queue.length})
+            キュー ({queue.length})
           </button>
           <button
             id="tab-settings"
@@ -1349,6 +1359,16 @@ export function App() {
               </div>
             )}
           </>
+        )}
+
+        {tab === 'radar' && (
+          <RadarPanel
+            settings={settings}
+            isJobRunning={isJobRunning}
+            onPatchSettings={handlePatchSettings}
+            showToast={showToast}
+            setErrorBanner={setErrorBanner}
+          />
         )}
 
         {tab === 'queue' && (
@@ -1816,7 +1836,7 @@ export function App() {
 
             <div className="settings-group">
               <h2 className="settings-group-title">巡回・受動ストック対象サイト（標準）</h2>
-              {(['x', 'note', 'zenn', 'yahoo_news', 'google_news'] as SourceId[]).map((srcId) => (
+              {PATROL_SOURCE_IDS.map((srcId) => (
                 <div key={srcId} className="toggle-row">
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div className="site-name-row">

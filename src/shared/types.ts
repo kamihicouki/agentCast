@@ -1,4 +1,21 @@
-export type SourceId = 'x' | 'note' | 'zenn' | 'yahoo_news' | 'google_news' | 'generic';
+export type SourceId =
+  | 'x'
+  | 'note'
+  | 'zenn'
+  | 'yahoo_news'
+  | 'google_news'
+  | 'youtube'
+  | 'generic';
+
+/** Built-in sources visited by the patrol tab (order = patrol order). */
+export const PATROL_SOURCE_IDS: SourceId[] = [
+  'x',
+  'youtube',
+  'note',
+  'zenn',
+  'yahoo_news',
+  'google_news',
+];
 
 export type ExtractionStrategy = 'auto' | 'readability' | 'changelog' | 'css_selector' | 'rss';
 
@@ -100,6 +117,15 @@ export const SOURCE_META: Record<
     extractionMethod: 'ログイン中DOM解析（見出し＋媒体名）',
     extractionDetail:
       'ログイン済み Google News 画面の <article> カードから報道タイトル・媒体名・日時を構造化収集します。',
+  },
+  youtube: {
+    label: 'YouTube (登録チャンネル新着)',
+    shortLabel: 'YouTube',
+    startUrl: 'https://www.youtube.com/feed/subscriptions',
+    description: 'ログイン中の登録チャンネル新着フィードから動画タイトル・チャンネル・長さを収集',
+    extractionMethod: 'DOM解析（登録チャンネル）+ 公開RSS + 字幕/概要',
+    extractionDetail:
+      '/feed/subscriptions の動画カード（ytd-rich-item-renderer）からタイトル・チャンネル・投稿時期・再生時間を取得。動向レーダーではチャンネル毎の公開RSS (feeds/videos.xml) で新着有無を判定し、動画要約は字幕トラック→概要欄の順に本文化します。',
   },
   generic: {
     label: 'カスタムサイト / 開いているWeb記事',
@@ -245,6 +271,12 @@ export interface ExtensionSettings {
   autoScheduleTime: string;
   playbackRate: number;
   focusTopics: string;
+  /** Look-back window (hours) for the very first radar check of a target. */
+  radarWindowHours: number;
+  /** Run the follow radar automatically as part of 「巡回して番組作成」. */
+  radarIncludeInPatrol: boolean;
+  /** Max X accounts visited per radar run (tab-based, rate-friendly). */
+  radarMaxXAccountsPerRun: number;
 }
 
 export const DEFAULT_SETTINGS: ExtensionSettings = {
@@ -266,6 +298,7 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
     zenn: true,
     yahoo_news: true,
     google_news: true,
+    youtube: true,
     generic: true,
   },
   customSites: [],
@@ -276,6 +309,76 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
   autoScheduleTime: '07:30',
   playbackRate: 1.0,
   focusTopics: 'AI・テクノロジー・開発トレンド・主要ニュース',
+  radarWindowHours: 72,
+  radarIncludeInPatrol: false,
+  radarMaxXAccountsPerRun: 12,
+};
+
+// ---------------------------------------------------------------------------
+// Follow radar (登録チャンネル・フォロー動向)
+// ---------------------------------------------------------------------------
+
+export type WatchPlatform = 'youtube' | 'x';
+export type WatchStatus = 'active' | 'quiet' | 'unknown' | 'error';
+
+export interface RadarItem {
+  id: string;
+  title: string;
+  url: string;
+  publishedAt?: string;
+  durationSec?: number;
+  excerpt?: string;
+}
+
+export interface WatchTarget {
+  /** `yt:UCxxxx` / `yt:@handle` / `x:handle` */
+  id: string;
+  platform: WatchPlatform;
+  name: string;
+  url: string;
+  channelId?: string;
+  handle?: string;
+  enabled: boolean;
+  addedAt: string;
+  lastCheckedAt?: string;
+  lastActivityAt?: string;
+  lastSeenItemIds: string[];
+  newCount: number;
+  latestItems: RadarItem[];
+  status: WatchStatus;
+  statusMessage?: string;
+}
+
+export type DigestVerdict = 'watch' | 'skim' | 'skip';
+
+export interface VideoDigest {
+  videoId: string;
+  url: string;
+  title: string;
+  channelName: string;
+  durationSec: number;
+  oneLiner: string;
+  summary: string[];
+  keyPoints: { time: string; point: string }[];
+  verdict: DigestVerdict;
+  verdictReason: string;
+  relevance: number;
+  /** transcript / gemini_video / description / heuristic */
+  method: 'transcript' | 'gemini_video' | 'description' | 'heuristic';
+  createdAt: string;
+}
+
+export const DIGEST_VERDICT_META: Record<DigestVerdict, { label: string; emoji: string }> = {
+  watch: { label: '見る', emoji: '▶' },
+  skim: { label: '流し見', emoji: '⏩' },
+  skip: { label: 'スキップ', emoji: '⏭' },
+};
+
+export const DIGEST_METHOD_LABEL: Record<VideoDigest['method'], string> = {
+  transcript: '字幕全文から要約',
+  gemini_video: 'Gemini 動画理解',
+  description: '概要欄から要約',
+  heuristic: '簡易判定（AI未使用）',
 };
 
 export interface PlaybackState {

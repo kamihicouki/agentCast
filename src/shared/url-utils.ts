@@ -65,6 +65,9 @@ export function detectSourceFromUrl(rawUrl: string): SourceId {
     if (host === 'zenn.dev' || host.endsWith('.zenn.dev')) return 'zenn';
     if (host === 'news.yahoo.co.jp') return 'yahoo_news';
     if (host === 'news.google.com') return 'google_news';
+    if (host === 'youtube.com' || host.endsWith('.youtube.com') || host === 'youtu.be') {
+      return 'youtube';
+    }
     return 'generic';
   } catch {
     return 'generic';

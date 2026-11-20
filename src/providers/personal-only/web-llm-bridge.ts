@@ -152,18 +152,16 @@ async function runDomPromptInWebSession(
   };
 }
 
-export async function generateScriptViaWebSession(
+export async function runPromptViaWebSession(
   provider: 'chatgpt' | 'gemini',
-  items: FeedItem[],
-  settings: ExtensionSettings
-): Promise<{ title: string; subtitle: string; chapters: EpisodeChapter[] }> {
+  prompt: string
+): Promise<string> {
   if (__AGENTCAST_TARGET__ !== 'main') {
     throw new Error('Webセッション連携モードは個人用（mainブランチ）ビルド専用です。');
   }
 
   const targetUrl =
     provider === 'chatgpt' ? 'https://chatgpt.com/' : 'https://gemini.google.com/app';
-  const prompt = buildPodcastScriptPrompt(items, settings);
 
   const tab = await chrome.tabs.create({ url: targetUrl, active: false });
   if (!tab.id) {
@@ -182,11 +180,20 @@ export async function generateScriptViaWebSession(
 
     const payload = execResults?.[0]?.result;
     if (!payload?.ok || !payload.responseText) {
-      throw new Error(payload?.error || 'Webセッション経由での台本生成に失敗しました。');
+      throw new Error(payload?.error || 'Webセッション経由での生成に失敗しました。');
     }
-
-    return parseGeneratedScriptJson(payload.responseText, items, settings);
+    return payload.responseText;
   } finally {
     await chrome.tabs.remove(tab.id).catch(() => {});
   }
+}
+
+export async function generateScriptViaWebSession(
+  provider: 'chatgpt' | 'gemini',
+  items: FeedItem[],
+  settings: ExtensionSettings
+): Promise<{ title: string; subtitle: string; chapters: EpisodeChapter[] }> {
+  const prompt = buildPodcastScriptPrompt(items, settings);
+  const responseText = await runPromptViaWebSession(provider, prompt);
+  return parseGeneratedScriptJson(responseText, items, settings);
 }
