@@ -82,6 +82,7 @@ export type RuntimeRequest =
   | { type: 'VERIFY_OPENAI_KEY'; apiKey?: string }
   | { type: 'START_PUBLISH_JOB'; job: PendingPublishJob }
   | { type: 'GET_PENDING_PUBLISH_JOB' }
+  | { type: 'GET_PENDING_PUBLISH_VIDEO_CHUNK'; jobId: string; offset: number; length: number }
   | { type: 'CLEAR_PENDING_PUBLISH_JOB' }
   | { type: 'RADAR_CHECK'; platforms?: ('youtube' | 'x')[] }
   | { type: 'RADAR_IMPORT_YOUTUBE_SUBS' }
@@ -115,6 +116,8 @@ export interface PendingPublishJob {
   expectedXHandle?: string;
   fileName?: string;
   mimeType?: string;
+  hasVideo?: boolean;
+  videoSizeBytes?: number;
   videoBase64?: string;
   createdAt: number;
 }

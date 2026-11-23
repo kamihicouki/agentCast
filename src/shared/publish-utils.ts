@@ -140,14 +140,59 @@ export function buildXPostPayload(
   return { postText, threadReplyText };
 }
 
-export async function blobToBase64(blob: Blob): Promise<string> {
-  const bytes = new Uint8Array(await blob.arrayBuffer());
+export const MAX_PUBLISH_VIDEO_CHUNK_BYTES = 8 * 1024 * 1024;
+
+export function bytesToBase64(bytes: Uint8Array): string {
   let binary = '';
-  const chunkSize = 0x8000;
+  const chunkSize = 0x4000;
   for (let i = 0; i < bytes.length; i += chunkSize) {
     binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
   }
   return btoa(binary);
+}
+
+export async function blobToArrayBuffer(blob: Blob): Promise<ArrayBuffer> {
+  if (typeof blob.arrayBuffer === 'function') {
+    return blob.arrayBuffer();
+  }
+  return new Promise<ArrayBuffer>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as ArrayBuffer);
+    reader.onerror = () => reject(reader.error || new Error('Failed to read blob'));
+    reader.readAsArrayBuffer(blob);
+  });
+}
+
+export async function blobToBase64(blob: Blob): Promise<string> {
+  return bytesToBase64(new Uint8Array(await blobToArrayBuffer(blob)));
+}
+
+export async function readBlobChunkAsBase64(
+  blob: Blob,
+  offset: number,
+  length: number
+): Promise<{
+  chunkBase64: string;
+  offset: number;
+  byteLength: number;
+  totalBytes: number;
+  done: boolean;
+}> {
+  const totalBytes = blob.size;
+  const safeOffset = Math.max(0, Math.min(Math.floor(offset || 0), totalBytes));
+  const requested = Math.floor(length || MAX_PUBLISH_VIDEO_CHUNK_BYTES);
+  const safeLength = Math.max(1, Math.min(requested, MAX_PUBLISH_VIDEO_CHUNK_BYTES));
+  const end = Math.min(totalBytes, safeOffset + safeLength);
+  const slice = blob.slice(safeOffset, end);
+  const bytes = new Uint8Array(await blobToArrayBuffer(slice));
+  const nextOffset = safeOffset + bytes.byteLength;
+  return {
+    chunkBase64: bytesToBase64(bytes),
+    offset: safeOffset,
+    byteLength: bytes.byteLength,
+    totalBytes,
+    done: nextOffset >= totalBytes,
+  };
 }
 
 function wrapCanvasText(
@@ -346,7 +391,7 @@ export async function renderEpisodeToMp4(
     codec: 'avc1.42001f',
     width,
     height,
-    bitrate: 450_000,
+    bitrate: 200_000,
     framerate: 1,
   });
 
@@ -371,7 +416,7 @@ export async function renderEpisodeToMp4(
       timestamp: sec * 1_000_000,
       duration: 1_000_000,
     });
-    videoEncoder.encode(frame, { keyFrame: sec === 0 || sec % 5 === 0 });
+    videoEncoder.encode(frame, { keyFrame: sec === 0 || sec % 10 === 0 });
     frame.close();
   }
 

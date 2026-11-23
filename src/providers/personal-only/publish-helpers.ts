@@ -10,6 +10,7 @@ export function injectYouTubePublishHelper(): void {
   win.__agentCastYtHelper__ = true;
 
   type PublishJob = {
+    id: string;
     platform: 'youtube' | 'x';
     title: string;
     description: string;
@@ -17,8 +18,22 @@ export function injectYouTubePublishHelper(): void {
     channelName?: string;
     fileName?: string;
     mimeType?: string;
+    hasVideo?: boolean;
+    videoSizeBytes?: number;
     videoBase64?: string;
   };
+
+  type VideoChunkResponse = {
+    ok?: boolean;
+    error?: string;
+    chunkBase64?: string;
+    offset?: number;
+    byteLength?: number;
+    totalBytes?: number;
+    done?: boolean;
+  };
+
+  const CHUNK_BYTES = 4 * 1024 * 1024;
 
   function queryAllDeep(root: Document | ShadowRoot | Element, selector: string): Element[] {
     const found: Element[] = Array.from(root.querySelectorAll(selector));
@@ -31,13 +46,33 @@ export function injectYouTubePublishHelper(): void {
     return found;
   }
 
-  function base64ToFile(base64: string, fileName: string, mimeType: string): File {
+  function base64ToBytes(base64: string): Uint8Array<ArrayBuffer> {
     const binary = atob(base64);
-    const bytes = new Uint8Array(binary.length);
+    const bytes = new Uint8Array(new ArrayBuffer(binary.length));
     for (let i = 0; i < binary.length; i++) {
       bytes[i] = binary.charCodeAt(i);
     }
-    return new File([bytes], fileName, { type: mimeType });
+    return bytes;
+  }
+
+  function requestVideoChunk(
+    jobId: string,
+    offset: number,
+    length: number
+  ): Promise<VideoChunkResponse> {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage(
+        { type: 'GET_PENDING_PUBLISH_VIDEO_CHUNK', jobId, offset, length },
+        (res) => {
+          const runtimeErr = chrome.runtime.lastError;
+          if (runtimeErr) {
+            reject(new Error(runtimeErr.message || '動画データの取得に失敗しました。'));
+            return;
+          }
+          resolve((res || {}) as VideoChunkResponse);
+        }
+      );
+    });
   }
 
   function setEditableText(el: HTMLElement, text: string): void {
@@ -55,6 +90,54 @@ export function injectYouTubePublishHelper(): void {
   chrome.runtime.sendMessage({ type: 'GET_PENDING_PUBLISH_JOB' }, (res) => {
     const job = res?.job as PublishJob | null;
     if (!job || job.platform !== 'youtube') return;
+
+    const hasVideo = Boolean(job.hasVideo || job.videoBase64);
+    let cachedVideoFile: File | null = null;
+    let loadingVideoPromise: Promise<File> | null = null;
+
+    async function loadVideoFile(onProgress?: (pct: number) => void): Promise<File> {
+      if (cachedVideoFile) return cachedVideoFile;
+      if (loadingVideoPromise) return loadingVideoPromise;
+
+      const fileName = job!.fileName || 'agentcast.mp4';
+      const mimeType = job!.mimeType || 'video/mp4';
+
+      if (job!.videoBase64) {
+        cachedVideoFile = new File([base64ToBytes(job!.videoBase64)], fileName, { type: mimeType });
+        return cachedVideoFile;
+      }
+
+      loadingVideoPromise = (async () => {
+        const parts: BlobPart[] = [];
+        let offset = 0;
+        for (;;) {
+          const chunk = await requestVideoChunk(job!.id, offset, CHUNK_BYTES);
+          if (!chunk?.ok) {
+            throw new Error(chunk?.error || '動画チャンクの読み込みに失敗しました。');
+          }
+          const bytes = chunk.chunkBase64 ? base64ToBytes(chunk.chunkBase64) : new Uint8Array(0);
+          if (bytes.byteLength > 0) {
+            parts.push(bytes);
+          }
+          offset += chunk.byteLength ?? bytes.byteLength;
+          const totalBytes = chunk.totalBytes ?? job!.videoSizeBytes ?? offset;
+          if (totalBytes > 0) {
+            onProgress?.(Math.min(100, Math.round((offset / totalBytes) * 100)));
+          }
+          if (chunk.done) break;
+          if ((chunk.byteLength ?? bytes.byteLength) <= 0) {
+            throw new Error('動画チャンクの転送が途中で終了しました。');
+          }
+        }
+        const file = new File(parts, fileName, { type: mimeType });
+        cachedVideoFile = file;
+        return file;
+      })().finally(() => {
+        loadingVideoPromise = null;
+      });
+
+      return loadingVideoPromise;
+    }
 
     const host = document.createElement('div');
     host.id = 'agentcast-yt-publish-assistant';
@@ -102,7 +185,7 @@ export function injectYouTubePublishHelper(): void {
     const statusEl = document.createElement('div');
     statusEl.style.cssText =
       'font-size:12px;color:#e5a44d;margin-bottom:10px;padding:7px 9px;background:#22252c;border-radius:8px;';
-    statusEl.textContent = job.videoBase64
+    statusEl.textContent = hasVideo
       ? '①「MP4を自動セット」→ アップロード画面が開いたら ②「タイトル・概要欄を入力」を押してください。'
       : '音声ファイル未生成のエピソードです。先に音声付きで番組を作成するか、概要欄をコピーしてご利用ください。';
 
@@ -113,7 +196,7 @@ export function injectYouTubePublishHelper(): void {
     attachBtn.textContent = '① MP4動画をアップロード枠へ自動セット';
     attachBtn.style.cssText =
       'background:#e56b43;color:#fff;border:none;border-radius:8px;padding:9px 12px;font-weight:700;font-size:12.5px;cursor:pointer;';
-    if (!job.videoBase64) attachBtn.style.display = 'none';
+    if (!hasVideo) attachBtn.style.display = 'none';
 
     const fillMetaBtn = document.createElement('button');
     fillMetaBtn.textContent = '② タイトル・概要欄・公開範囲を自動入力';
@@ -127,15 +210,15 @@ export function injectYouTubePublishHelper(): void {
     downloadBtn.textContent = 'MP4保存';
     downloadBtn.style.cssText =
       'flex:1;background:#22252c;color:#c4bdb1;border:1px solid rgba(244,239,230,0.14);border-radius:7px;padding:6px 8px;font-size:11.5px;cursor:pointer;';
-    if (!job.videoBase64) downloadBtn.style.display = 'none';
+    if (!hasVideo) downloadBtn.style.display = 'none';
 
     const copyDescBtn = document.createElement('button');
     copyDescBtn.textContent = '概要欄コピー';
     copyDescBtn.style.cssText =
       'flex:1;background:#22252c;color:#c4bdb1;border:1px solid rgba(244,239,230,0.14);border-radius:7px;padding:6px 8px;font-size:11.5px;cursor:pointer;';
 
-    attachBtn.onclick = () => {
-      if (!job.videoBase64) return;
+    attachBtn.onclick = async () => {
+      if (!hasVideo) return;
       const inputs = queryAllDeep(document, 'input[type="file"]') as HTMLInputElement[];
       const targetInput =
         inputs.find((inp) => (inp.name || '').toLowerCase().includes('file')) || inputs[0];
@@ -146,12 +229,14 @@ export function injectYouTubePublishHelper(): void {
         return;
       }
 
+      attachBtn.disabled = true;
+      downloadBtn.disabled = true;
       try {
-        const file = base64ToFile(
-          job.videoBase64,
-          job.fileName || 'agentcast.mp4',
-          job.mimeType || 'video/mp4'
-        );
+        statusEl.style.color = '#e5a44d';
+        statusEl.textContent = 'MP4動画データを読み込み中...';
+        const file = await loadVideoFile((pct) => {
+          statusEl.textContent = `MP4動画データを読み込み中... (${pct}%)`;
+        });
         const dt = new DataTransfer();
         dt.items.add(file);
         targetInput.files = dt.files;
@@ -162,6 +247,9 @@ export function injectYouTubePublishHelper(): void {
       } catch (err) {
         statusEl.style.color = '#ef857d';
         statusEl.textContent = `自動セットに失敗しました。「MP4保存」から手動ドロップしてください (${String(err)})`;
+      } finally {
+        attachBtn.disabled = false;
+        downloadBtn.disabled = false;
       }
     };
 
@@ -201,19 +289,31 @@ export function injectYouTubePublishHelper(): void {
       }
     };
 
-    downloadBtn.onclick = () => {
-      if (!job.videoBase64) return;
-      const file = base64ToFile(
-        job.videoBase64,
-        job.fileName || 'agentcast.mp4',
-        job.mimeType || 'video/mp4'
-      );
-      const url = URL.createObjectURL(file);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = file.name;
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    downloadBtn.onclick = async () => {
+      if (!hasVideo) return;
+      attachBtn.disabled = true;
+      downloadBtn.disabled = true;
+      try {
+        statusEl.style.color = '#e5a44d';
+        statusEl.textContent = 'MP4動画データを準備中...';
+        const file = await loadVideoFile((pct) => {
+          statusEl.textContent = `MP4動画データを準備中... (${pct}%)`;
+        });
+        const url = URL.createObjectURL(file);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = file.name;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
+        statusEl.style.color = '#65c493';
+        statusEl.textContent = '✅ MP4動画のダウンロードを開始しました。';
+      } catch (err) {
+        statusEl.style.color = '#ef857d';
+        statusEl.textContent = `MP4保存に失敗しました (${String(err)})`;
+      } finally {
+        attachBtn.disabled = false;
+        downloadBtn.disabled = false;
+      }
     };
 
     copyDescBtn.onclick = () => {
@@ -243,6 +343,7 @@ export function injectXPublishHelper(): void {
   win.__agentCastXHelper__ = true;
 
   type PublishJob = {
+    id: string;
     platform: 'youtube' | 'x';
     title: string;
     postText: string;
@@ -250,16 +351,50 @@ export function injectXPublishHelper(): void {
     expectedXHandle?: string;
     fileName?: string;
     mimeType?: string;
+    hasVideo?: boolean;
+    videoSizeBytes?: number;
     videoBase64?: string;
   };
 
-  function base64ToFile(base64: string, fileName: string, mimeType: string): File {
+  type VideoChunkResponse = {
+    ok?: boolean;
+    error?: string;
+    chunkBase64?: string;
+    offset?: number;
+    byteLength?: number;
+    totalBytes?: number;
+    done?: boolean;
+  };
+
+  const CHUNK_BYTES = 4 * 1024 * 1024;
+
+  function base64ToBytes(base64: string): Uint8Array<ArrayBuffer> {
     const binary = atob(base64);
-    const bytes = new Uint8Array(binary.length);
+    const bytes = new Uint8Array(new ArrayBuffer(binary.length));
     for (let i = 0; i < binary.length; i++) {
       bytes[i] = binary.charCodeAt(i);
     }
-    return new File([bytes], fileName, { type: mimeType });
+    return bytes;
+  }
+
+  function requestVideoChunk(
+    jobId: string,
+    offset: number,
+    length: number
+  ): Promise<VideoChunkResponse> {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage(
+        { type: 'GET_PENDING_PUBLISH_VIDEO_CHUNK', jobId, offset, length },
+        (res) => {
+          const runtimeErr = chrome.runtime.lastError;
+          if (runtimeErr) {
+            reject(new Error(runtimeErr.message || '動画データの取得に失敗しました。'));
+            return;
+          }
+          resolve((res || {}) as VideoChunkResponse);
+        }
+      );
+    });
   }
 
   function detectLoggedInHandle(): string {
@@ -271,6 +406,54 @@ export function injectXPublishHelper(): void {
   chrome.runtime.sendMessage({ type: 'GET_PENDING_PUBLISH_JOB' }, (res) => {
     const job = res?.job as PublishJob | null;
     if (!job || job.platform !== 'x') return;
+
+    const hasVideo = Boolean(job.hasVideo || job.videoBase64);
+    let cachedVideoFile: File | null = null;
+    let loadingVideoPromise: Promise<File> | null = null;
+
+    async function loadVideoFile(onProgress?: (pct: number) => void): Promise<File> {
+      if (cachedVideoFile) return cachedVideoFile;
+      if (loadingVideoPromise) return loadingVideoPromise;
+
+      const fileName = job!.fileName || 'agentcast.mp4';
+      const mimeType = job!.mimeType || 'video/mp4';
+
+      if (job!.videoBase64) {
+        cachedVideoFile = new File([base64ToBytes(job!.videoBase64)], fileName, { type: mimeType });
+        return cachedVideoFile;
+      }
+
+      loadingVideoPromise = (async () => {
+        const parts: BlobPart[] = [];
+        let offset = 0;
+        for (;;) {
+          const chunk = await requestVideoChunk(job!.id, offset, CHUNK_BYTES);
+          if (!chunk?.ok) {
+            throw new Error(chunk?.error || '動画チャンクの読み込みに失敗しました。');
+          }
+          const bytes = chunk.chunkBase64 ? base64ToBytes(chunk.chunkBase64) : new Uint8Array(0);
+          if (bytes.byteLength > 0) {
+            parts.push(bytes);
+          }
+          offset += chunk.byteLength ?? bytes.byteLength;
+          const totalBytes = chunk.totalBytes ?? job!.videoSizeBytes ?? offset;
+          if (totalBytes > 0) {
+            onProgress?.(Math.min(100, Math.round((offset / totalBytes) * 100)));
+          }
+          if (chunk.done) break;
+          if ((chunk.byteLength ?? bytes.byteLength) <= 0) {
+            throw new Error('動画チャンクの転送が途中で終了しました。');
+          }
+        }
+        const file = new File(parts, fileName, { type: mimeType });
+        cachedVideoFile = file;
+        return file;
+      })().finally(() => {
+        loadingVideoPromise = null;
+      });
+
+      return loadingVideoPromise;
+    }
 
     const host = document.createElement('div');
     host.id = 'agentcast-x-publish-assistant';
@@ -323,7 +506,7 @@ export function injectXPublishHelper(): void {
     const statusEl = document.createElement('div');
     statusEl.style.cssText =
       'font-size:12px;color:#c4bdb1;margin-bottom:10px;padding:7px 9px;background:#22252c;border-radius:8px;';
-    statusEl.textContent = job.videoBase64
+    statusEl.textContent = hasVideo
       ? '本文を自動セット済みです。下のボタンでポッドキャスト動画を添付し、確認後に「ポストする」を押してください。'
       : '本文を自動セット済みです。内容を確認して「ポストする」を押してください。';
 
@@ -334,7 +517,7 @@ export function injectXPublishHelper(): void {
     attachBtn.textContent = '🎬 ポッドキャスト動画 (MP4) を添付';
     attachBtn.style.cssText =
       'background:#e56b43;color:#fff;border:none;border-radius:8px;padding:9px 12px;font-weight:700;font-size:12.5px;cursor:pointer;';
-    if (!job.videoBase64) attachBtn.style.display = 'none';
+    if (!hasVideo) attachBtn.style.display = 'none';
 
     const copyReplyBtn = document.createElement('button');
     copyReplyBtn.textContent = '📋 参照リンク（リプライ用）をコピー';
@@ -345,10 +528,10 @@ export function injectXPublishHelper(): void {
     downloadBtn.textContent = 'MP4をローカル保存（手動添付用）';
     downloadBtn.style.cssText =
       'background:#22252c;color:#c4bdb1;border:1px solid rgba(244,239,230,0.14);border-radius:7px;padding:6px 8px;font-size:11.5px;cursor:pointer;';
-    if (!job.videoBase64) downloadBtn.style.display = 'none';
+    if (!hasVideo) downloadBtn.style.display = 'none';
 
-    attachBtn.onclick = () => {
-      if (!job.videoBase64) return;
+    attachBtn.onclick = async () => {
+      if (!hasVideo) return;
       const input = document.querySelector<HTMLInputElement>(
         'input[data-testid="fileInput"], input[type="file"][accept*="video"]'
       );
@@ -359,12 +542,14 @@ export function injectXPublishHelper(): void {
         return;
       }
 
+      attachBtn.disabled = true;
+      downloadBtn.disabled = true;
       try {
-        const file = base64ToFile(
-          job.videoBase64,
-          job.fileName || 'agentcast.mp4',
-          job.mimeType || 'video/mp4'
-        );
+        statusEl.style.color = '#e5a44d';
+        statusEl.textContent = 'MP4動画データを読み込み中...';
+        const file = await loadVideoFile((pct) => {
+          statusEl.textContent = `MP4動画データを読み込み中... (${pct}%)`;
+        });
         const dt = new DataTransfer();
         dt.items.add(file);
         input.files = dt.files;
@@ -375,6 +560,9 @@ export function injectXPublishHelper(): void {
       } catch (err) {
         statusEl.style.color = '#ef857d';
         statusEl.textContent = `動画添付に失敗しました: ${String(err)}`;
+      } finally {
+        attachBtn.disabled = false;
+        downloadBtn.disabled = false;
       }
     };
 
@@ -385,19 +573,31 @@ export function injectXPublishHelper(): void {
       });
     };
 
-    downloadBtn.onclick = () => {
-      if (!job.videoBase64) return;
-      const file = base64ToFile(
-        job.videoBase64,
-        job.fileName || 'agentcast.mp4',
-        job.mimeType || 'video/mp4'
-      );
-      const url = URL.createObjectURL(file);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = file.name;
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    downloadBtn.onclick = async () => {
+      if (!hasVideo) return;
+      attachBtn.disabled = true;
+      downloadBtn.disabled = true;
+      try {
+        statusEl.style.color = '#e5a44d';
+        statusEl.textContent = 'MP4動画データを準備中...';
+        const file = await loadVideoFile((pct) => {
+          statusEl.textContent = `MP4動画データを準備中... (${pct}%)`;
+        });
+        const url = URL.createObjectURL(file);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = file.name;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
+        statusEl.style.color = '#65c493';
+        statusEl.textContent = '✅ MP4動画のダウンロードを開始しました。';
+      } catch (err) {
+        statusEl.style.color = '#ef857d';
+        statusEl.textContent = `MP4保存に失敗しました (${String(err)})`;
+      } finally {
+        attachBtn.disabled = false;
+        downloadBtn.disabled = false;
+      }
     };
 
     btnCol.appendChild(attachBtn);

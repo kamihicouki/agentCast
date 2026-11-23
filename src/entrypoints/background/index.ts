@@ -1,5 +1,7 @@
 import {
+  clearPublishMedia,
   db,
+  getPublishMedia,
   getSettings,
   getUnreadQueue,
   ingestCandidates,
@@ -30,6 +32,7 @@ import type {
 } from '../../shared/messages';
 import { DATA_CONSENT_KEY, DATA_CONSENT_REQUIRED, hasDataConsent, requireDataConsent } from '../../shared/data-consent';
 import { canReadPage, matchesPassiveSite, toOriginPattern } from '../../shared/permissions';
+import { readBlobChunkAsBase64 } from '../../shared/publish-utils';
 import { parseZennRssXml } from '../../extractors/zenn';
 import { parseGenericRssOrAtomXml } from '../../extractors/custom-site';
 import {
@@ -1406,7 +1409,7 @@ const dataOperations = new Set<RuntimeRequest['type']>([
   'RESYNTHESIZE_EPISODE_AUDIO', 'PATROL_AND_GENERATE', 'UPDATE_SETTINGS', 'PATROL_CUSTOM_SITE', 'START_GEMINI_KEY_SETUP',
   'GEMINI_KEY_CAPTURED', 'VERIFY_GEMINI_KEY', 'START_OPENAI_KEY_SETUP', 'OPENAI_KEY_CAPTURED',
   'VERIFY_OPENAI_KEY', 'START_PUBLISH_JOB', 'GET_PENDING_PUBLISH_JOB',
-  'CLEAR_PENDING_PUBLISH_JOB', 'RADAR_CHECK', 'RADAR_IMPORT_YOUTUBE_SUBS',
+  'GET_PENDING_PUBLISH_VIDEO_CHUNK', 'CLEAR_PENDING_PUBLISH_JOB', 'RADAR_CHECK', 'RADAR_IMPORT_YOUTUBE_SUBS',
   'RADAR_IMPORT_X_FOLLOWING', 'RADAR_ADD_TARGET', 'RADAR_GENERATE_EPISODE',
   'SUMMARIZE_YOUTUBE_VIDEO', 'SUMMARIZE_ACTIVE_YOUTUBE_TAB', 'ORGANIZE_GEMINI_NOTEBOOK',
 ]);
@@ -1829,10 +1832,40 @@ function handleRequest(
       sendResponse({ ok: true, job: isPublishTarget(sender) ? pendingPublishJob : null });
       return false;
 
+    case 'GET_PENDING_PUBLISH_VIDEO_CHUNK':
+      void (async () => {
+        if (!isPublishTarget(sender) || !pendingPublishJob || pendingPublishJob.id !== message.jobId) {
+          sendResponse({ ok: false, error: '公開動画データが見つかりません。' });
+          return;
+        }
+        if (!pendingPublishVideoBlob) {
+          const media = await getPublishMedia(message.jobId);
+          pendingPublishVideoBlob = media?.blob ?? null;
+        }
+        if (!pendingPublishVideoBlob) {
+          sendResponse({ ok: false, error: '公開動画データの読み込みに失敗しました。' });
+          return;
+        }
+        const chunk = await readBlobChunkAsBase64(
+          pendingPublishVideoBlob,
+          message.offset,
+          message.length
+        );
+        sendResponse({ ok: true, ...chunk });
+      })().catch((err: unknown) =>
+        sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) })
+      );
+      return true;
+
     case 'CLEAR_PENDING_PUBLISH_JOB':
       if (isPublishTarget(sender)) {
+        const jobId = pendingPublishJob?.id;
         pendingPublishJob = null;
         pendingPublishTabId = undefined;
+        pendingPublishVideoBlob = null;
+        if (jobId) {
+          void clearPublishMedia(jobId).catch(() => {});
+        }
       }
       sendResponse({ ok: true });
       return false;
@@ -1993,6 +2026,7 @@ function handleRequest(
 
 let pendingPublishJob: PendingPublishJob | null = null;
 let pendingPublishTabId: number | undefined;
+let pendingPublishVideoBlob: Blob | null = null;
 
 function isPublishTarget(sender: chrome.runtime.MessageSender): boolean {
   return Boolean(sender.url && pendingPublishJob && pendingPublishTabId !== undefined &&
@@ -2014,6 +2048,7 @@ async function startPublishJob(job: PendingPublishJob): Promise<number | undefin
   if (!tabId) return undefined;
   pendingPublishJob = job;
   pendingPublishTabId = tabId;
+  pendingPublishVideoBlob = null;
 
   const expectedHost =
     job.platform === 'youtube' ? 'studio.youtube.com' : 'x.com';
@@ -2044,8 +2079,13 @@ async function startPublishJob(job: PendingPublishJob): Promise<number | undefin
 
   const cleanup = () => {
     if (pendingPublishTabId === tabId) {
+      const jobId = pendingPublishJob?.id;
       pendingPublishJob = null;
       pendingPublishTabId = undefined;
+      pendingPublishVideoBlob = null;
+      if (jobId) {
+        void clearPublishMedia(jobId).catch(() => {});
+      }
     }
     chrome.tabs.onUpdated.removeListener(onUpdated);
     chrome.tabs.onRemoved.removeListener(onRemoved);

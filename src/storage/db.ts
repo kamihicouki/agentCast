@@ -22,6 +22,15 @@ export interface ChapterAudioRecord {
   createdAt: string;
 }
 
+export interface PublishMediaRecord {
+  jobId: string;
+  blob: Blob;
+  mimeType: string;
+  fileName: string;
+  sizeBytes: number;
+  createdAt: number;
+}
+
 class AgentCastDatabase extends Dexie {
   feedItems!: Table<FeedItem, string>;
   episodes!: Table<PodcastEpisode, string>;
@@ -29,6 +38,7 @@ class AgentCastDatabase extends Dexie {
   watchTargets!: Table<WatchTarget, string>;
   videoDigests!: Table<VideoDigest, string>;
   credentialKeys!: Table<{ id: string; key: CryptoKey }, string>;
+  publishMedia!: Table<PublishMediaRecord, string>;
 
   constructor() {
     super('agentCastDB');
@@ -46,6 +56,7 @@ class AgentCastDatabase extends Dexie {
       videoDigests: 'videoId, createdAt',
     });
     this.version(3).stores({ credentialKeys: 'id' });
+    this.version(4).stores({ publishMedia: 'jobId, createdAt' });
   }
 }
 
@@ -258,4 +269,23 @@ export async function markItemsConsumed(itemIds: string[], episodeId: string): P
 
 export function makeChapterKey(episodeId: string, chapterIndex: number): string {
   return `${episodeId}:${chapterIndex}`;
+}
+
+export async function savePublishMedia(record: PublishMediaRecord): Promise<void> {
+  await db.transaction('rw', db.publishMedia, async () => {
+    await db.publishMedia.clear();
+    await db.publishMedia.put(record);
+  });
+}
+
+export async function getPublishMedia(jobId: string): Promise<PublishMediaRecord | undefined> {
+  return db.publishMedia.get(jobId);
+}
+
+export async function clearPublishMedia(jobId?: string): Promise<void> {
+  if (jobId) {
+    await db.publishMedia.delete(jobId);
+    return;
+  }
+  await db.publishMedia.clear();
 }

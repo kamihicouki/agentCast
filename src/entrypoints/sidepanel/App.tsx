@@ -1,5 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { db, getSettings, getUnreadQueue } from '../../storage/db';
+import {
+  clearPublishMedia,
+  db,
+  getSettings,
+  getUnreadQueue,
+  savePublishMedia,
+} from '../../storage/db';
 import {
   DEFAULT_SETTINGS,
   INITIAL_PLAYBACK_STATE,
@@ -27,7 +33,6 @@ import {
   shareEpisodeNative,
 } from '../../shared/export-utils';
 import {
-  blobToBase64,
   buildXPostPayload,
   buildYouTubeMetadata,
   buildYouTubeStudioUploadUrl,
@@ -544,24 +549,37 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
     setErrorBanner('');
     setIsExporting(true);
     setBusyMessage('YouTube 公開用 MP4 動画を準備中...');
+    const jobId = `pub-yt-${Date.now()}`;
+    let savedMedia = false;
     try {
       const targetUrl = buildYouTubeStudioUploadUrl(settings.publish.youtubeChannelIdOrUrl);
       if (!(await ensureHostPermissionsForUrls([targetUrl]))) {
         throw new Error('YouTube Studio へのアクセスが許可されませんでした。');
       }
-      let videoBase64: string | undefined;
+      let hasVideo = false;
+      let videoSizeBytes: number | undefined;
       let fileName: string | undefined;
       if (hasAudioExportable) {
         const rendered = await renderEpisodeToMp4(displayedEpisode, (msg) => setBusyMessage(msg));
         if (rendered) {
           fileName = rendered.fileName;
+          videoSizeBytes = rendered.blob.size;
           setBusyMessage('YouTube Studio へ転送準備中...');
-          videoBase64 = await blobToBase64(rendered.blob);
+          await savePublishMedia({
+            jobId,
+            blob: rendered.blob,
+            mimeType: 'video/mp4',
+            fileName: rendered.fileName,
+            sizeBytes: rendered.blob.size,
+            createdAt: Date.now(),
+          });
+          savedMedia = true;
+          hasVideo = true;
         }
       }
       const ytMeta = buildYouTubeMetadata(displayedEpisode, settings.publish);
       const job: PendingPublishJob = {
-        id: `pub-yt-${Date.now()}`,
+        id: jobId,
         platform: 'youtube',
         targetUrl,
         title: ytMeta.title,
@@ -572,7 +590,8 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
         channelName: settings.publish.youtubeChannelName,
         fileName,
         mimeType: 'video/mp4',
-        videoBase64,
+        hasVideo,
+        videoSizeBytes,
         createdAt: Date.now(),
       };
       const res = await chrome.runtime.sendMessage({
@@ -582,6 +601,9 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
       if (!res?.ok) throw new Error(res?.error || 'YouTube Studio を開けませんでした。');
       showToast('YouTube Studio を開きました。右下の公開ガイドからセットできます');
     } catch (err) {
+      if (savedMedia) {
+        void clearPublishMedia(jobId).catch(() => {});
+      }
       setErrorBanner(`YouTube 公開準備エラー: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setIsExporting(false);
@@ -594,24 +616,37 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
     setErrorBanner('');
     setIsExporting(true);
     setBusyMessage('X.com 投稿データを準備中...');
+    const jobId = `pub-x-${Date.now()}`;
+    let savedMedia = false;
     try {
       if (!(await ensureHostPermissionsForUrls(['https://x.com/']))) {
         throw new Error('X へのアクセスが許可されませんでした。');
       }
-      let videoBase64: string | undefined;
+      let hasVideo = false;
+      let videoSizeBytes: number | undefined;
       let fileName: string | undefined;
       if (settings.publish.xAttachVideo && hasAudioExportable) {
         const rendered = await renderEpisodeToMp4(displayedEpisode, (msg) => setBusyMessage(msg));
         if (rendered) {
           fileName = rendered.fileName;
+          videoSizeBytes = rendered.blob.size;
           setBusyMessage('X.com へ転送準備中...');
-          videoBase64 = await blobToBase64(rendered.blob);
+          await savePublishMedia({
+            jobId,
+            blob: rendered.blob,
+            mimeType: 'video/mp4',
+            fileName: rendered.fileName,
+            sizeBytes: rendered.blob.size,
+            createdAt: Date.now(),
+          });
+          savedMedia = true;
+          hasVideo = true;
         }
       }
       const xPayload = buildXPostPayload(displayedEpisode, settings.publish);
       const targetUrl = `https://x.com/compose/post?text=${encodeURIComponent(xPayload.postText)}`;
       const job: PendingPublishJob = {
-        id: `pub-x-${Date.now()}`,
+        id: jobId,
         platform: 'x',
         targetUrl,
         title: displayedEpisode.title,
@@ -621,7 +656,8 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
         expectedXHandle: settings.publish.xAccountHandle,
         fileName,
         mimeType: 'video/mp4',
-        videoBase64,
+        hasVideo,
+        videoSizeBytes,
         createdAt: Date.now(),
       };
       const res = await chrome.runtime.sendMessage({
@@ -631,6 +667,9 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
       if (!res?.ok) throw new Error(res?.error || 'X を開けませんでした。');
       showToast('X.com の投稿画面を開きました');
     } catch (err) {
+      if (savedMedia) {
+        void clearPublishMedia(jobId).catch(() => {});
+      }
       setErrorBanner(`X.com 投稿準備エラー: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setIsExporting(false);
