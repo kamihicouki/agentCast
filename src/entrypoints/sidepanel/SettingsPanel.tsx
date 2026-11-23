@@ -1,14 +1,15 @@
 import React from 'react';
-import type {
-  BuildMeta,
-  DurationMode,
-  ExtensionSettings,
-  YouTubeVisibility,
+import {
+  GEMINI_TTS_MODELS,
+  GEMINI_VOICES,
+  OPENAI_TTS_MODELS,
+  type BuildMeta,
+  type DurationMode,
+  type ExtensionSettings,
+  type YouTubeVisibility,
 } from '../../shared/types';
 import type { RuntimeRequest } from '../../shared/messages';
 import { DATA_CONSENT_REQUIRED, PRIVACY_POLICY_URL } from '../../shared/data-consent';
-
-const GEMINI_VOICES = ['Puck', 'Aoede', 'Kore', 'Charon', 'Fenrir', 'Leda'];
 
 interface SettingsPanelProps {
   settings: ExtensionSettings;
@@ -17,11 +18,15 @@ interface SettingsPanelProps {
   isJobRunning?: boolean;
   isVerifyingKey: boolean;
   keyVerifyStatus: { ok: boolean; text: string } | null;
+  isVerifyingOpenAiKey: boolean;
+  openAiKeyVerifyStatus: { ok: boolean; text: string } | null;
   isOrganizingGeminiNotebook?: boolean;
   geminiNotebookStatus?: { ok: boolean; text: string } | null;
   onPatchSettings: (patch: Partial<ExtensionSettings>) => Promise<void>;
   onStartGeminiKeySetup: () => Promise<void>;
   onVerifyGeminiKey: () => Promise<void>;
+  onStartOpenAiKeySetup: () => Promise<void>;
+  onVerifyOpenAiKey: () => Promise<void>;
   onOrganizeGeminiNotebook?: () => Promise<void>;
   onCreateDemo: () => Promise<void>;
   onGoToPatrol: () => void;
@@ -35,11 +40,15 @@ export function SettingsPanel({
   isJobRunning,
   isVerifyingKey,
   keyVerifyStatus,
+  isVerifyingOpenAiKey,
+  openAiKeyVerifyStatus,
   isOrganizingGeminiNotebook,
   geminiNotebookStatus,
   onPatchSettings,
   onStartGeminiKeySetup,
   onVerifyGeminiKey,
+  onStartOpenAiKeySetup,
+  onVerifyOpenAiKey,
   onOrganizeGeminiNotebook,
   onCreateDemo,
   onGoToPatrol,
@@ -50,6 +59,18 @@ export function SettingsPanel({
     settings.aiMode === 'web_gemini' ||
     (settings.aiMode === 'gemini_api' && Boolean(settings.geminiApiKey.trim())) ||
     (settings.aiMode === 'openai_api' && Boolean(settings.openaiApiKey.trim()));
+
+  const isTtsReady =
+    settings.ttsMode === 'macos_speech' ||
+    (settings.ttsMode === 'gemini_tts' && Boolean(settings.geminiApiKey.trim())) ||
+    (settings.ttsMode === 'openai_tts' && Boolean(settings.openaiApiKey.trim()));
+
+  const isEngineReady = isAiReady && isTtsReady;
+  const statusLabel = isEngineReady
+    ? '接続OK'
+    : isAiReady && !isTtsReady
+      ? 'TTSキー未設定'
+      : '未設定';
 
   const durationMode: DurationMode = settings.durationMode || 'fixed';
   const durationMin = Math.max(3, Math.min(30, settings.targetDurationMin || 10));
@@ -71,8 +92,8 @@ export function SettingsPanel({
       <div className="n-primary-card">
         <div className="card-head-row">
           <strong>⚡ AI 台本 &amp; 音声エンジン</strong>
-          <span className={`pill-badge ${isAiReady ? 'is-sage' : 'is-amber'}`}>
-            {isAiReady ? '接続OK' : '未設定'}
+          <span className={`pill-badge ${isEngineReady ? 'is-sage' : 'is-amber'}`}>
+            {statusLabel}
           </span>
         </div>
 
@@ -155,6 +176,64 @@ export function SettingsPanel({
             </div>
           )}
 
+        <div className="field-row">
+          <label className="field-label" htmlFor="select-tts-mode">
+            音声合成エンジン (TTS)
+          </label>
+          <select
+            id="select-tts-mode"
+            className="field-select"
+            value={settings.ttsMode}
+            onChange={(e) =>
+              void onPatchSettings({ ttsMode: e.target.value as ExtensionSettings['ttsMode'] })
+            }
+          >
+            <option value="gemini_tts">Gemini Multi-Speaker TTS（自然な2人掛け合い音声）</option>
+            <option value="openai_tts">OpenAI TTS（話者別MP3合成）</option>
+            <option value="macos_speech">macOS Web Speech（無料・ローカル日本語音声）</option>
+          </select>
+        </div>
+
+        {settings.ttsMode === 'gemini_tts' && (
+          <div className="field-row">
+            <label className="field-label" htmlFor="select-gemini-tts-model">
+              Gemini TTS モデル
+            </label>
+            <select
+              id="select-gemini-tts-model"
+              className="field-select"
+              value={settings.geminiTtsModel || 'gemini-3.8-flash-tts'}
+              onChange={(e) => void onPatchSettings({ geminiTtsModel: e.target.value })}
+            >
+              {GEMINI_TTS_MODELS.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        {settings.ttsMode === 'openai_tts' && (
+          <div className="field-row">
+            <label className="field-label" htmlFor="select-openai-tts-model">
+              OpenAI TTS モデル
+            </label>
+            <select
+              id="select-openai-tts-model"
+              className="field-select"
+              value={settings.openaiTtsModel || 'tts-1'}
+              onChange={(e) => void onPatchSettings({ openaiTtsModel: e.target.value })}
+            >
+              {OPENAI_TTS_MODELS.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+
         {(settings.aiMode === 'gemini_api' || settings.ttsMode === 'gemini_tts') && (
           <div className="field-row">
             <label className="field-label" htmlFor="input-gemini-key">
@@ -174,7 +253,7 @@ export function SettingsPanel({
                 className="btn-primary"
                 onClick={() => void onStartGeminiKeySetup()}
               >
-                ⚡ AI Studio で半自動取得
+                ⚡ AI Studio でワンクリック連携
               </button>
               <button
                 type="button"
@@ -185,6 +264,11 @@ export function SettingsPanel({
                 {isVerifyingKey ? '検証中…' : '接続テスト'}
               </button>
             </div>
+            {!settings.geminiApiKey.trim() && (
+              <p className="field-hint" style={{ marginTop: 6 }}>
+                上のボタンを押すと Google AI Studio が開き、キー作成またはコピーで agentCast に自動連携されます。
+              </p>
+            )}
             {keyVerifyStatus && (
               <p
                 className="field-hint"
@@ -201,7 +285,7 @@ export function SettingsPanel({
         {(settings.aiMode === 'openai_api' || settings.ttsMode === 'openai_tts') && (
           <div className="field-row">
             <label className="field-label" htmlFor="input-openai-key">
-              OpenAI API Key
+              OpenAI API Key（ローカルのみ保存）
             </label>
             <input
               id="input-openai-key"
@@ -211,26 +295,40 @@ export function SettingsPanel({
               value={settings.openaiApiKey}
               onChange={(e) => void onPatchSettings({ openaiApiKey: e.target.value })}
             />
+            <div className="action-row-2" style={{ marginTop: 6 }}>
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={() => void onStartOpenAiKeySetup()}
+              >
+                ⚡ OpenAI でワンクリック連携
+              </button>
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={isVerifyingOpenAiKey || !settings.openaiApiKey.trim()}
+                onClick={() => void onVerifyOpenAiKey()}
+              >
+                {isVerifyingOpenAiKey ? '検証中…' : '接続テスト'}
+              </button>
+            </div>
+            {!settings.openaiApiKey.trim() && (
+              <p className="field-hint" style={{ marginTop: 6 }}>
+                上のボタンを押すと OpenAI API Keys が開き、キーを作成すると自動で agentCast に連携されます（※ChatGPT Plusとは別枠のAPIクレジットが必要です）。
+              </p>
+            )}
+            {openAiKeyVerifyStatus && (
+              <p
+                className="field-hint"
+                style={{
+                  color: openAiKeyVerifyStatus.ok ? 'var(--accent-sage)' : 'var(--danger-soft)',
+                }}
+              >
+                {openAiKeyVerifyStatus.text}
+              </p>
+            )}
           </div>
         )}
-
-        <div className="field-row">
-          <label className="field-label" htmlFor="select-tts-mode">
-            音声合成エンジン (TTS)
-          </label>
-          <select
-            id="select-tts-mode"
-            className="field-select"
-            value={settings.ttsMode}
-            onChange={(e) =>
-              void onPatchSettings({ ttsMode: e.target.value as ExtensionSettings['ttsMode'] })
-            }
-          >
-            <option value="gemini_tts">Gemini Multi-Speaker TTS（自然な2人掛け合い音声）</option>
-            <option value="openai_tts">OpenAI TTS（話者別MP3合成）</option>
-            <option value="macos_speech">macOS Web Speech（無料・ローカル日本語音声）</option>
-          </select>
-        </div>
       </div>
 
       {/* [3] Default Program Length (Slider + Fixed/Auto) */}

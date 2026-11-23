@@ -110,6 +110,8 @@ export async function synthesizeChapterWithOpenAITts(
   const mp3Chunks: Uint8Array[] = [];
   let totalBytes = 0;
 
+  const ttsModel = settings.openaiTtsModel?.trim() || 'tts-1';
+
   for (const turn of chapter.turns) {
     const voice = turn.speaker === 'HostA' ? 'onyx' : 'nova';
     await requireDataConsent();
@@ -121,7 +123,7 @@ export async function synthesizeChapterWithOpenAITts(
         Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
-        model: 'tts-1',
+        model: ttsModel,
         voice,
         response_format: 'mp3',
         input: turn.spokenText || turn.text,

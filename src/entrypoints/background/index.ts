@@ -60,6 +60,10 @@ import {
   verifyGeminiApiKey,
 } from '../../providers/personal-only/aistudio-key-helper';
 import {
+  injectOpenAiKeyHelper,
+  verifyOpenAiApiKey,
+} from '../../providers/personal-only/openai-key-helper';
+import {
   injectXPublishHelper,
   injectYouTubePublishHelper,
 } from '../../providers/personal-only/publish-helpers';
@@ -864,8 +868,8 @@ function getProviderLabels(settings: ExtensionSettings): {
   };
 
   const ttsMap: Record<ExtensionSettings['ttsMode'], string> = {
-    gemini_tts: `Gemini Multi-Speaker TTS (${settings.hostAVoice} & ${settings.hostBVoice})`,
-    openai_tts: 'OpenAI Multi-Voice TTS',
+    gemini_tts: `Gemini TTS (${settings.geminiTtsModel || 'gemini-3.8-flash-tts'} / ${settings.hostAVoice} & ${settings.hostBVoice})`,
+    openai_tts: `OpenAI TTS (${settings.openaiTtsModel || 'tts-1'})`,
     macos_speech: 'macOS Web Speech (ローカル日本語音声)',
   };
 
@@ -1082,6 +1086,163 @@ async function generateEpisodeFromItems(
   }
 }
 
+async function resynthesizeEpisodeAudio(options: {
+  episodeId: string;
+  ttsMode: ExtensionSettings['ttsMode'];
+  geminiTtsModel?: string;
+  openaiTtsModel?: string;
+  hostAVoice?: string;
+  hostBVoice?: string;
+  mode?: 'duplicate' | 'overwrite';
+}): Promise<{ episode: PodcastEpisode; warnings: string[] }> {
+  await requireDataConsent();
+  const source = await db.episodes.get(options.episodeId);
+  if (!source || source.chapters.length === 0) {
+    throw new Error('再合成対象の番組または台本が見つかりませんでした。');
+  }
+
+  const baseSettings = await getSettings();
+  const effectiveSettings: ExtensionSettings = {
+    ...baseSettings,
+    ttsMode: options.ttsMode,
+    geminiTtsModel: options.geminiTtsModel?.trim() || baseSettings.geminiTtsModel,
+    openaiTtsModel: options.openaiTtsModel?.trim() || baseSettings.openaiTtsModel,
+    hostAVoice: options.hostAVoice?.trim() || baseSettings.hostAVoice,
+    hostBVoice: options.hostBVoice?.trim() || baseSettings.hostBVoice,
+  };
+
+  if (effectiveSettings.ttsMode === 'gemini_tts' && !effectiveSettings.geminiApiKey.trim()) {
+    throw new Error(
+      'Gemini TTS 用の API キーが未設定です。「設定」タブでワンクリック連携してください。'
+    );
+  }
+  if (effectiveSettings.ttsMode === 'openai_tts' && !effectiveSettings.openaiApiKey.trim()) {
+    throw new Error(
+      'OpenAI TTS 用の API キーが未設定です。「設定」タブでワンクリック連携してください。'
+    );
+  }
+
+  const mode = options.mode ?? 'duplicate';
+  const now = Date.now();
+  const nowIso = new Date(now).toISOString();
+  const targetEpisodeId = mode === 'overwrite' ? source.id : `ep-${now}`;
+  const labels = getProviderLabels(effectiveSettings);
+
+  const clonedChapters = source.chapters.map((ch, idx) => ({
+    ...ch,
+    index: idx,
+    turns: ch.turns.map((t) => ({ ...t })),
+    sourceItems: ch.sourceItems.map((s) => ({ ...s })),
+    hasAudioBlob: false,
+  }));
+
+  if (mode === 'overwrite') {
+    await db.chapterAudio.where('episodeId').equals(targetEpisodeId).delete();
+  }
+
+  const workingEpisode: PodcastEpisode = {
+    ...source,
+    id: targetEpisodeId,
+    createdAt: mode === 'overwrite' ? source.createdAt : nowIso,
+    updatedAt: nowIso,
+    chapters: clonedChapters,
+    totalDurationSec: clonedChapters.reduce((s, c) => s + c.durationSec, 0),
+    status: effectiveSettings.ttsMode === 'macos_speech' ? 'ready' : 'synthesizing_audio',
+    statusDetail:
+      effectiveSettings.ttsMode === 'macos_speech'
+        ? undefined
+        : `${labels.ttsEngineLabel} でチャプター 1/${clonedChapters.length} を再合成中...`,
+    ttsEngineLabel: labels.ttsEngineLabel,
+  };
+
+  await db.episodes.put(workingEpisode);
+  broadcastEvent({ type: 'EPISODES_UPDATED', episodeId: targetEpisodeId });
+
+  const warnings: string[] = [];
+
+  if (effectiveSettings.ttsMode !== 'macos_speech') {
+    let successCount = 0;
+    let firstError: string | null = null;
+    let autoPlayTriggered = false;
+
+    for (let i = 0; i < workingEpisode.chapters.length; i++) {
+      await requireDataConsent();
+      const ch = workingEpisode.chapters[i];
+      const progressText = `${labels.ttsEngineLabel} でチャプター ${i + 1}/${workingEpisode.chapters.length}「${ch.title.slice(0, 20)}」を再合成中...`;
+      workingEpisode.statusDetail = progressText;
+      workingEpisode.updatedAt = new Date().toISOString();
+      updateJobProgress(progressText);
+      await db.episodes.put({ ...workingEpisode });
+      broadcastEvent({ type: 'EPISODES_UPDATED', episodeId: targetEpisodeId });
+
+      try {
+        const audioRes =
+          effectiveSettings.ttsMode === 'gemini_tts'
+            ? await synthesizeChapterWithGeminiTts(ch, effectiveSettings)
+            : await synthesizeChapterWithOpenAITts(ch, effectiveSettings);
+
+        await db.chapterAudio.put({
+          chapterKey: makeChapterKey(targetEpisodeId, i),
+          episodeId: targetEpisodeId,
+          chapterIndex: i,
+          blob: audioRes.blob,
+          mimeType: audioRes.mimeType,
+          durationSec: audioRes.durationSec,
+          createdAt: new Date().toISOString(),
+        });
+
+        workingEpisode.chapters[i] = {
+          ...ch,
+          durationSec: audioRes.durationSec,
+          hasAudioBlob: true,
+        };
+        workingEpisode.totalDurationSec = workingEpisode.chapters.reduce(
+          (s, c) => s + c.durationSec,
+          0
+        );
+        workingEpisode.updatedAt = new Date().toISOString();
+        await db.episodes.put({ ...workingEpisode });
+        broadcastEvent({ type: 'EPISODES_UPDATED', episodeId: targetEpisodeId });
+        successCount += 1;
+
+        if (i === 0 && !autoPlayTriggered && !latestPlaybackState.isPlaying) {
+          autoPlayTriggered = true;
+          await playEpisodeInOffscreen(workingEpisode, 0, effectiveSettings.playbackRate);
+        }
+      } catch (ttsErr) {
+        const msg = ttsErr instanceof Error ? ttsErr.message : String(ttsErr);
+        if (!firstError) firstError = msg;
+        warnings.push(`Ch.${i + 1}: ${msg}`);
+        console.warn(`[agentCast] Resynthesize chapter ${i} failed:`, ttsErr);
+      }
+    }
+
+    if (successCount === 0) {
+      if (mode === 'duplicate') {
+        await deleteEpisodeById(targetEpisodeId);
+        broadcastEvent({ type: 'EPISODES_UPDATED' });
+      } else {
+        workingEpisode.status = 'ready';
+        workingEpisode.statusDetail = undefined;
+        workingEpisode.updatedAt = new Date().toISOString();
+        await db.episodes.put({ ...workingEpisode });
+        broadcastEvent({ type: 'EPISODES_UPDATED', episodeId: targetEpisodeId });
+      }
+      throw new Error(firstError || '音声の再合成に失敗しました。');
+    }
+
+    workingEpisode.status = 'ready';
+    workingEpisode.statusDetail = undefined;
+    workingEpisode.updatedAt = new Date().toISOString();
+    await db.episodes.put({ ...workingEpisode });
+  } else if (!latestPlaybackState.isPlaying) {
+    await playEpisodeInOffscreen(workingEpisode, 0, effectiveSettings.playbackRate);
+  }
+
+  broadcastEvent({ type: 'EPISODES_UPDATED', episodeId: targetEpisodeId });
+  return { episode: workingEpisode, warnings };
+}
+
 async function patrolAndGenerateEpisode(sources?: SourceId[]): Promise<{
   warnings: string[];
 }> {
@@ -1238,8 +1399,9 @@ async function playEpisodeInOffscreen(
 const dataOperations = new Set<RuntimeRequest['type']>([
   'PASSIVE_CANDIDATES', 'CAPTURE_ACTIVE_TAB', 'CAPTURE_AND_GENERATE_ACTIVE_TAB',
   'LIST_TAB_GROUPS', 'PATROL_TAB_GROUP', 'PATROL_ALL_TABS', 'PATROL_SOURCES', 'GENERATE_EPISODE_FROM_QUEUE',
-  'PATROL_AND_GENERATE', 'UPDATE_SETTINGS', 'PATROL_CUSTOM_SITE', 'START_GEMINI_KEY_SETUP',
-  'GEMINI_KEY_CAPTURED', 'VERIFY_GEMINI_KEY', 'START_PUBLISH_JOB', 'GET_PENDING_PUBLISH_JOB',
+  'RESYNTHESIZE_EPISODE_AUDIO', 'PATROL_AND_GENERATE', 'UPDATE_SETTINGS', 'PATROL_CUSTOM_SITE', 'START_GEMINI_KEY_SETUP',
+  'GEMINI_KEY_CAPTURED', 'VERIFY_GEMINI_KEY', 'START_OPENAI_KEY_SETUP', 'OPENAI_KEY_CAPTURED',
+  'VERIFY_OPENAI_KEY', 'START_PUBLISH_JOB', 'GET_PENDING_PUBLISH_JOB',
   'CLEAR_PENDING_PUBLISH_JOB', 'RADAR_CHECK', 'RADAR_IMPORT_YOUTUBE_SUBS',
   'RADAR_IMPORT_X_FOLLOWING', 'RADAR_ADD_TARGET', 'RADAR_GENERATE_EPISODE',
   'SUMMARIZE_YOUTUBE_VIDEO', 'SUMMARIZE_ACTIVE_YOUTUBE_TAB', 'ORGANIZE_GEMINI_NOTEBOOK',
@@ -1409,6 +1571,26 @@ function handleRequest(
       });
       return false;
 
+    case 'RESYNTHESIZE_EPISODE_AUDIO':
+      if (isJobRunning) {
+        sendResponse({ ok: false, error: '現在別の番組生成・再合成が実行中です。' });
+        return false;
+      }
+      sendResponse({ ok: true, started: true });
+      void runBackgroundJob('同じ台本で別TTSの音声を再作成中...', async () => {
+        const res = await resynthesizeEpisodeAudio({
+          episodeId: message.episodeId,
+          ttsMode: message.ttsMode,
+          geminiTtsModel: message.geminiTtsModel,
+          openaiTtsModel: message.openaiTtsModel,
+          hostAVoice: message.hostAVoice,
+          hostBVoice: message.hostBVoice,
+          mode: message.mode,
+        });
+        return { warnings: res.warnings };
+      });
+      return false;
+
     case 'PATROL_AND_GENERATE':
       if (isJobRunning) {
         sendResponse({ ok: false, error: '現在別の巡回・番組生成が実行中です。' });
@@ -1571,7 +1753,6 @@ function handleRequest(
         }
         await saveSettings({
           geminiApiKey: key,
-          aiMode: 'gemini_api',
           ttsMode: 'gemini_tts',
         });
         broadcastEvent({
@@ -1587,6 +1768,47 @@ function handleRequest(
       void (async () => {
         const key = (message.apiKey ?? (await getSettings()).geminiApiKey).trim();
         const result = await verifyGeminiApiKey(key);
+        sendResponse({ ok: result.valid, message: result.message });
+      })().catch((error: Error) => sendResponse({ ok: false, error: error.message }));
+      return true;
+
+    case 'START_OPENAI_KEY_SETUP':
+      void startOpenAiKeySetup()
+        .then((tabId) => sendResponse({ ok: true, tabId }))
+        .catch((err: unknown) =>
+          sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) })
+        );
+      return true;
+
+    case 'OPENAI_KEY_CAPTURED':
+      if (!sender.url?.startsWith('https://platform.openai.com/')) {
+        sendResponse({ ok: false, error: 'OpenAI Platform からキーを取得してください。' });
+        return false;
+      }
+      void (async () => {
+        const key = (message.apiKey || '').trim();
+        const verify = await verifyOpenAiApiKey(key);
+        if (!verify.valid) {
+          sendResponse({ ok: false, error: verify.message });
+          return;
+        }
+        await saveSettings({
+          openaiApiKey: key,
+          ttsMode: 'openai_tts',
+        });
+        broadcastEvent({
+          type: 'OPENAI_KEY_SETUP_DONE',
+          valid: true,
+          message: verify.message,
+        });
+        sendResponse({ ok: true, message: verify.message });
+      })().catch((error: Error) => sendResponse({ ok: false, error: error.message }));
+      return true;
+
+    case 'VERIFY_OPENAI_KEY':
+      void (async () => {
+        const key = (message.apiKey ?? (await getSettings()).openaiApiKey).trim();
+        const result = await verifyOpenAiApiKey(key);
         sendResponse({ ok: result.valid, message: result.message });
       })().catch((error: Error) => sendResponse({ ok: false, error: error.message }));
       return true;
@@ -1889,6 +2111,61 @@ async function startGeminiKeySetup(): Promise<number | undefined> {
   setTimeout(cleanup, 5 * 60 * 1000);
 
   // Inject asynchronously so sendResponse({ ok: true, tabId }) returns IMMEDIATELY without timing out!
+  void (async () => {
+    await waitForTabReady(tabId, 16000);
+    await sleep(1000);
+    await tryInject();
+  })();
+
+  return tabId;
+}
+
+async function startOpenAiKeySetup(): Promise<number | undefined> {
+  if (!(await canReadPage('https://platform.openai.com/api-keys'))) {
+    throw new Error('OpenAI Platform へのアクセスが許可されていません。');
+  }
+  const tab = await chrome.tabs.create({
+    url: 'https://platform.openai.com/api-keys',
+    active: true,
+  });
+  const tabId = tab.id;
+  if (!tabId) return undefined;
+
+  const tryInject = async () => {
+    try {
+      const current = await chrome.tabs.get(tabId);
+      if (!(await hasDataConsent()) || !current.url?.startsWith('https://platform.openai.com/')) {
+        return;
+      }
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        func: injectOpenAiKeyHelper,
+      });
+    } catch {
+      // Ignore transient navigation or permission errors while OpenAI login redirects
+    }
+  };
+
+  // Re-inject automatically when OpenAI Platform finishes loading or redirects back after sign-in
+  const onUpdated = (updatedTabId: number, changeInfo: chrome.tabs.TabChangeInfo) => {
+    if (updatedTabId === tabId && changeInfo.status === 'complete') {
+      setTimeout(() => void tryInject(), 900);
+    }
+  };
+
+  const cleanup = () => {
+    chrome.tabs.onUpdated.removeListener(onUpdated);
+    chrome.tabs.onRemoved.removeListener(onRemoved);
+  };
+
+  const onRemoved = (removedTabId: number) => {
+    if (removedTabId === tabId) cleanup();
+  };
+
+  chrome.tabs.onUpdated.addListener(onUpdated);
+  chrome.tabs.onRemoved.addListener(onRemoved);
+  setTimeout(cleanup, 5 * 60 * 1000);
+
   void (async () => {
     await waitForTabReady(tabId, 16000);
     await sleep(1000);

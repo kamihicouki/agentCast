@@ -6,6 +6,7 @@ import type {
   PlaybackState,
   PodcastEpisode,
   SourceId,
+  TTSMode,
 } from './types';
 
 export interface CustomExtractRule {
@@ -35,6 +36,16 @@ export type RuntimeRequest =
       itemIds?: string[];
       durationMin?: number;
       durationMode?: 'fixed' | 'auto';
+    }
+  | {
+      type: 'RESYNTHESIZE_EPISODE_AUDIO';
+      episodeId: string;
+      ttsMode: TTSMode;
+      geminiTtsModel?: string;
+      openaiTtsModel?: string;
+      hostAVoice?: string;
+      hostBVoice?: string;
+      mode?: 'duplicate' | 'overwrite';
     }
   | { type: 'DELETE_EPISODE'; episodeId: string }
   | { type: 'CLEANUP_STALE_EPISODES' }
@@ -66,6 +77,9 @@ export type RuntimeRequest =
   | { type: 'START_GEMINI_KEY_SETUP' }
   | { type: 'GEMINI_KEY_CAPTURED'; apiKey: string; closeSetupTab?: boolean }
   | { type: 'VERIFY_GEMINI_KEY'; apiKey?: string }
+  | { type: 'START_OPENAI_KEY_SETUP' }
+  | { type: 'OPENAI_KEY_CAPTURED'; apiKey: string; closeSetupTab?: boolean }
+  | { type: 'VERIFY_OPENAI_KEY'; apiKey?: string }
   | { type: 'START_PUBLISH_JOB'; job: PendingPublishJob }
   | { type: 'GET_PENDING_PUBLISH_JOB' }
   | { type: 'CLEAR_PENDING_PUBLISH_JOB' }

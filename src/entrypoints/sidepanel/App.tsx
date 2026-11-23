@@ -36,7 +36,7 @@ import {
 import { SettingsPanel } from './SettingsPanel';
 import { PatrolPanel } from './PatrolPanel';
 import { QueuePanel } from './QueuePanel';
-import { PlayerPanel } from './PlayerPanel';
+import { PlayerPanel, type ResynthesizeRequest } from './PlayerPanel';
 
 type ActiveTab = 'settings' | 'patrol' | 'queue' | 'player';
 
@@ -174,6 +174,11 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
   const [keyVerifyStatus, setKeyVerifyStatus] = useState<{ ok: boolean; text: string } | null>(
     null
   );
+  const [isVerifyingOpenAiKey, setIsVerifyingOpenAiKey] = useState<boolean>(false);
+  const [openAiKeyVerifyStatus, setOpenAiKeyVerifyStatus] = useState<{
+    ok: boolean;
+    text: string;
+  } | null>(null);
   const [isOrganizingGeminiNotebook, setIsOrganizingGeminiNotebook] = useState<boolean>(false);
   const [geminiNotebookStatus, setGeminiNotebookStatus] = useState<{
     ok: boolean;
@@ -316,6 +321,15 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
             ? msg.message
             : 'Gemini API キーを設定しました！';
         setKeyVerifyStatus({ ok: true, text });
+        showToast(text);
+      } else if (msg?.type === 'OPENAI_KEY_SETUP_DONE') {
+        void getSettings().then(setSettings);
+        setErrorBanner('');
+        const text =
+          typeof msg.message === 'string'
+            ? msg.message
+            : 'OpenAI API キーを設定しました！';
+        setOpenAiKeyVerifyStatus({ ok: true, text });
         showToast(text);
       }
     };
@@ -666,6 +680,71 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
     }
   };
 
+  const handleStartOpenAiKeySetup = async () => {
+    setErrorBanner('');
+    setOpenAiKeyVerifyStatus(null);
+    try {
+      if (!(await ensureHostPermissionsForUrls(['https://platform.openai.com/api-keys']))) {
+        throw new Error('OpenAI Platform へのアクセスが許可されませんでした。');
+      }
+      const res = await chrome.runtime.sendMessage({
+        type: 'START_OPENAI_KEY_SETUP',
+      } satisfies RuntimeRequest);
+      if (res?.ok) {
+        showToast('OpenAI API Keys を開きました。キーを作成すると自動で連携されます');
+        return;
+      }
+      throw new Error(res?.error || 'OpenAI Platform を開けませんでした。');
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleVerifyOpenAiKey = async () => {
+    setIsVerifyingOpenAiKey(true);
+    setOpenAiKeyVerifyStatus(null);
+    try {
+      const res = await chrome.runtime.sendMessage({
+        type: 'VERIFY_OPENAI_KEY',
+        apiKey: settings.openaiApiKey,
+      } satisfies RuntimeRequest);
+      setOpenAiKeyVerifyStatus({
+        ok: Boolean(res?.ok),
+        text: res?.message || (res?.ok ? '接続OK' : '接続に失敗しました'),
+      });
+    } catch (err) {
+      setOpenAiKeyVerifyStatus({
+        ok: false,
+        text: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setIsVerifyingOpenAiKey(false);
+    }
+  };
+
+  const handleResynthesizeEpisode = async (req: ResynthesizeRequest) => {
+    setErrorBanner('');
+    try {
+      const res = await chrome.runtime.sendMessage({
+        type: 'RESYNTHESIZE_EPISODE_AUDIO',
+        episodeId: req.episodeId,
+        ttsMode: req.ttsMode,
+        geminiTtsModel: req.geminiTtsModel,
+        openaiTtsModel: req.openaiTtsModel,
+        hostAVoice: req.hostAVoice,
+        hostBVoice: req.hostBVoice,
+        mode: req.mode,
+      } satisfies RuntimeRequest);
+      if (res?.ok) {
+        showToast('同じ台本で別TTSの音声再作成を開始しました');
+        return;
+      }
+      throw new Error(res?.error || '音声の再作成を開始できませんでした。');
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : String(err));
+    }
+  };
+
   const handleOrganizeGeminiNotebook = async () => {
     setErrorBanner('');
     setIsOrganizingGeminiNotebook(true);
@@ -829,11 +908,15 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
             isJobRunning={isJobRunning}
             isVerifyingKey={isVerifyingKey}
             keyVerifyStatus={keyVerifyStatus}
+            isVerifyingOpenAiKey={isVerifyingOpenAiKey}
+            openAiKeyVerifyStatus={openAiKeyVerifyStatus}
             isOrganizingGeminiNotebook={isOrganizingGeminiNotebook}
             geminiNotebookStatus={geminiNotebookStatus}
             onPatchSettings={handlePatchSettings}
             onStartGeminiKeySetup={handleStartGeminiKeySetup}
             onVerifyGeminiKey={handleVerifyGeminiKey}
+            onStartOpenAiKeySetup={handleStartOpenAiKeySetup}
+            onVerifyOpenAiKey={handleVerifyOpenAiKey}
             onOrganizeGeminiNotebook={handleOrganizeGeminiNotebook}
             onCreateDemo={handleCreateDemo}
             onGoToPatrol={() => setTab('patrol')}
@@ -882,6 +965,7 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
             displayedChapterIndex={displayedChapterIndex}
             isSelectedPlayingEpisode={isSelectedPlayingEpisode}
             playback={playback}
+            settings={settings}
             isJobRunning={isJobRunning}
             hasAudioExportable={hasAudioExportable}
             isExporting={isExporting}
@@ -896,6 +980,9 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
             onSeekRelative={handleSeekRelative}
             onCycleSpeed={() => void handleCycleSpeed()}
             onDeleteEpisode={(id) => void handleDeleteEpisode(id)}
+            onResynthesizeEpisode={handleResynthesizeEpisode}
+            onStartGeminiKeySetup={handleStartGeminiKeySetup}
+            onStartOpenAiKeySetup={handleStartOpenAiKeySetup}
             onDownloadAudio={() => void handleDownloadAudio()}
             onDownloadHtml={() => void handleDownloadHtml()}
             onCopyMarkdown={() => void handleCopyMarkdown()}

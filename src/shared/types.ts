@@ -367,6 +367,20 @@ export const DEFAULT_PUBLISH_SETTINGS: PublishSettings = {
 
 export type DurationMode = 'fixed' | 'auto';
 
+export const GEMINI_VOICES = ['Puck', 'Aoede', 'Kore', 'Charon', 'Fenrir', 'Leda'] as const;
+
+export const GEMINI_TTS_MODELS = [
+  { id: 'gemini-3.8-flash-tts', label: 'gemini-3.8-flash-tts（最新・高速）' },
+  { id: 'gemini-2.5-flash-preview-tts', label: 'gemini-2.5-flash-preview-tts（標準）' },
+  { id: 'gemini-2.5-pro-preview-tts', label: 'gemini-2.5-pro-preview-tts（高品質）' },
+] as const;
+
+export const OPENAI_TTS_MODELS = [
+  { id: 'gpt-4o-mini-tts', label: 'gpt-4o-mini-tts（自然・最新）' },
+  { id: 'tts-1', label: 'tts-1（高速・低コスト）' },
+  { id: 'tts-1-hd', label: 'tts-1-hd（高音質）' },
+] as const;
+
 export interface ExtensionSettings {
   aiMode: AIMode;
   ttsMode: TTSMode;
@@ -379,6 +393,7 @@ export interface ExtensionSettings {
   hostBVoice: string;
   openaiApiKey: string;
   openaiModel: string;
+  openaiTtsModel: string;
   /** Target podcast length in minutes (slider 3..30) when durationMode === 'fixed'. */
   targetDurationMin: number;
   /** 'fixed' uses targetDurationMin; 'auto' lets the AI fit duration to the material. */
@@ -418,6 +433,7 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
   hostBVoice: 'Aoede',
   openaiApiKey: '',
   openaiModel: 'gpt-4o-mini',
+  openaiTtsModel: 'tts-1',
   targetDurationMin: 10,
   durationMode: 'fixed',
   enabledSources: {

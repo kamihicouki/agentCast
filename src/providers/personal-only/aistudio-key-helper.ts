@@ -62,6 +62,7 @@ export function injectAiStudioKeyHelper(): void {
   const KEY_RE = /\b(AIza[0-9A-Za-z_-]{35})\b/;
   let detectedKey = '';
   let alreadySent = false;
+  let sending = false;
 
   // Create sleek floating studio assistant banner at bottom-right of AI Studio
   const host = document.createElement('div');
@@ -71,7 +72,7 @@ export function injectAiStudioKeyHelper(): void {
     'right:20px',
     'bottom:20px',
     'z-index:2147483647',
-    'width:340px',
+    'width:350px',
     'background:#181a1f',
     'color:#f4efe6',
     'border:1px solid rgba(229,107,67,0.55)',
@@ -85,7 +86,7 @@ export function injectAiStudioKeyHelper(): void {
 
   const titleEl = document.createElement('div');
   titleEl.style.cssText = 'font-weight:700;font-size:14px;margin-bottom:6px;display:flex;justify-content:space-between;align-items:center;';
-  titleEl.innerHTML = '<span>🎙 agentCast かんたんキー設定</span>';
+  titleEl.innerHTML = '<span>🎙 agentCast Gemini ワンクリック連携</span>';
 
   const closeBtn = document.createElement('button');
   closeBtn.textContent = '✕';
@@ -96,7 +97,7 @@ export function injectAiStudioKeyHelper(): void {
   const statusEl = document.createElement('div');
   statusEl.style.cssText = 'color:#c4bdb1;font-size:12.5px;margin-bottom:10px;';
   statusEl.textContent =
-    '「API キーを作成（Create API key）」を押すか、既存のキーを開くと agentCast が自動検出します。';
+    '「API キーを作成（Create API key）」を押すか既存のキーを開くと、agentCast が自動検出して接続テスト〜連携まで完了します。';
 
   const actionRow = document.createElement('div');
   actionRow.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;';
@@ -119,9 +120,11 @@ export function injectAiStudioKeyHelper(): void {
   document.body.appendChild(host);
 
   const sendKeyToExtension = (key: string) => {
-    if (alreadySent || !KEY_RE.test(key)) return;
-    alreadySent = true;
-    statusEl.textContent = 'agentCast へキーを保存して接続テスト中...';
+    if (alreadySent || sending || !KEY_RE.test(key)) return;
+    sending = true;
+    const masked = `${key.slice(0, 8)}••••••••${key.slice(-4)}`;
+    statusEl.style.color = '#f4efe6';
+    statusEl.textContent = `Gemini APIキー (${masked}) を検出！接続テストして連携中...`;
     applyKeyBtn.disabled = true;
 
     chrome.runtime.sendMessage(
@@ -131,15 +134,17 @@ export function injectAiStudioKeyHelper(): void {
         closeSetupTab: false,
       },
       (res) => {
+        sending = false;
         if (res?.ok) {
+          alreadySent = true;
           statusEl.style.color = '#65c493';
           statusEl.textContent =
-            '✅ 設定完了！Side Panel に戻ってそのまま番組を作成できます（このタブは閉じてOKです）。';
+            '✅ Gemini TTS 連携完了！Side Panel に戻ってそのまま番組を作成できます（このタブは閉じてOKです）。';
           applyKeyBtn.style.display = 'none';
           highlightCreateBtn.style.display = 'none';
         } else {
-          alreadySent = false;
           applyKeyBtn.disabled = false;
+          applyKeyBtn.style.display = 'inline-block';
           statusEl.style.color = '#ef857d';
           statusEl.textContent = res?.error || '設定に失敗しました。もう一度お試しください。';
         }
@@ -173,15 +178,24 @@ export function injectAiStudioKeyHelper(): void {
       btn.style.outlineOffset = '3px';
       btn.click();
       statusEl.textContent =
-        '作成ダイアログを開きました。プロジェクトを選んでキーが生成されると自動で検出します。';
+        '作成ダイアログを開きました。プロジェクトを選んでキーが生成されると自動で連携します。';
     } else {
       statusEl.textContent =
         'ページ内の「Create API key / API キーを作成」ボタンをクリックしてください。';
     }
   };
 
+  const handleDetectedKey = (key: string) => {
+    if (alreadySent || sending) return;
+    if (detectedKey === key) return;
+    detectedKey = key;
+    highlightCreateBtn.style.display = 'none';
+    applyKeyBtn.style.display = 'inline-block';
+    sendKeyToExtension(key);
+  };
+
   const scanForKey = () => {
-    if (alreadySent) return;
+    if (alreadySent || sending) return;
 
     // 1. Check input fields, code blocks, dialogs, and visible text nodes for full AIzaSy... key
     const candidates: string[] = [];
@@ -200,12 +214,7 @@ export function injectAiStudioKeyHelper(): void {
     for (const raw of candidates) {
       const match = KEY_RE.exec(raw);
       if (match?.[1]) {
-        detectedKey = match[1];
-        const masked = `${detectedKey.slice(0, 8)}••••••••${detectedKey.slice(-4)}`;
-        statusEl.style.color = '#f4efe6';
-        statusEl.textContent = `Gemini APIキー (${masked}) を検出しました！下のボタンで即設定できます。`;
-        highlightCreateBtn.style.display = 'none';
-        applyKeyBtn.style.display = 'inline-block';
+        handleDetectedKey(match[1]);
         return;
       }
     }
@@ -216,11 +225,7 @@ export function injectAiStudioKeyHelper(): void {
     const selection = window.getSelection()?.toString() || '';
     const match = KEY_RE.exec(selection);
     if (match?.[1]) {
-      detectedKey = match[1];
-      const masked = `${detectedKey.slice(0, 8)}••••••••${detectedKey.slice(-4)}`;
-      statusEl.textContent = `コピーされたキー (${masked}) を検出しました！ボタンを押すと設定完了します。`;
-      highlightCreateBtn.style.display = 'none';
-      applyKeyBtn.style.display = 'inline-block';
+      handleDetectedKey(match[1]);
     }
   });
 

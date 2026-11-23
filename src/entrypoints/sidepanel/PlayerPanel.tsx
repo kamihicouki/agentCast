@@ -1,10 +1,25 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
+  GEMINI_TTS_MODELS,
+  GEMINI_VOICES,
+  OPENAI_TTS_MODELS,
   SOURCE_META,
   type EpisodeChapter,
+  type ExtensionSettings,
   type PlaybackState,
   type PodcastEpisode,
+  type TTSMode,
 } from '../../shared/types';
+
+export interface ResynthesizeRequest {
+  episodeId: string;
+  ttsMode: TTSMode;
+  geminiTtsModel?: string;
+  openaiTtsModel?: string;
+  hostAVoice?: string;
+  hostBVoice?: string;
+  mode: 'duplicate' | 'overwrite';
+}
 
 interface PlayerPanelProps {
   episodes: PodcastEpisode[];
@@ -13,6 +28,7 @@ interface PlayerPanelProps {
   displayedChapterIndex: number;
   isSelectedPlayingEpisode: boolean;
   playback: PlaybackState;
+  settings: ExtensionSettings;
   isJobRunning: boolean;
   hasAudioExportable: boolean;
   isExporting: boolean;
@@ -27,6 +43,9 @@ interface PlayerPanelProps {
   onSeekRelative: (deltaSec: number) => void;
   onCycleSpeed: () => void;
   onDeleteEpisode: (epId: string) => void;
+  onResynthesizeEpisode: (req: ResynthesizeRequest) => Promise<void>;
+  onStartGeminiKeySetup: () => Promise<void>;
+  onStartOpenAiKeySetup: () => Promise<void>;
   onDownloadAudio: () => void;
   onDownloadHtml: () => void;
   onCopyMarkdown: () => void;
@@ -47,6 +66,7 @@ export function PlayerPanel({
   displayedChapterIndex,
   isSelectedPlayingEpisode,
   playback,
+  settings,
   isJobRunning,
   hasAudioExportable,
   isExporting,
@@ -61,6 +81,9 @@ export function PlayerPanel({
   onSeekRelative,
   onCycleSpeed,
   onDeleteEpisode,
+  onResynthesizeEpisode,
+  onStartGeminiKeySetup,
+  onStartOpenAiKeySetup,
   onDownloadAudio,
   onDownloadHtml,
   onCopyMarkdown,
@@ -76,6 +99,35 @@ export function PlayerPanel({
     playback.isPlaying ? 'now' : 'library'
   );
   const [search, setSearch] = useState('');
+  const [showResynth, setShowResynth] = useState(false);
+  const [resynthTtsMode, setResynthTtsMode] = useState<TTSMode>(settings.ttsMode);
+  const [resynthGeminiModel, setResynthGeminiModel] = useState<string>(
+    settings.geminiTtsModel || 'gemini-3.8-flash-tts'
+  );
+  const [resynthOpenAiModel, setResynthOpenAiModel] = useState<string>(
+    settings.openaiTtsModel || 'tts-1'
+  );
+  const [resynthHostAVoice, setResynthHostAVoice] = useState<string>(settings.hostAVoice || 'Puck');
+  const [resynthHostBVoice, setResynthHostBVoice] = useState<string>(settings.hostBVoice || 'Aoede');
+  const [resynthDuplicate, setResynthDuplicate] = useState<boolean>(true);
+
+  useEffect(() => {
+    setResynthTtsMode(settings.ttsMode);
+    setResynthGeminiModel(settings.geminiTtsModel || 'gemini-3.8-flash-tts');
+    setResynthOpenAiModel(settings.openaiTtsModel || 'tts-1');
+    setResynthHostAVoice(settings.hostAVoice || 'Puck');
+    setResynthHostBVoice(settings.hostBVoice || 'Aoede');
+  }, [
+    settings.ttsMode,
+    settings.geminiTtsModel,
+    settings.openaiTtsModel,
+    settings.hostAVoice,
+    settings.hostBVoice,
+  ]);
+
+  const missingResynthKey =
+    (resynthTtsMode === 'gemini_tts' && !settings.geminiApiKey.trim()) ||
+    (resynthTtsMode === 'openai_tts' && !settings.openaiApiKey.trim());
 
   const filteredEpisodes = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -249,6 +301,7 @@ export function PlayerPanel({
                 <div className="np-timestamp">
                   {formatEpisodeTimestamp(displayedEpisode.createdAt)} ・{' '}
                   {formatSec(displayedEpisode.totalDurationSec)}
+                  {displayedEpisode.ttsEngineLabel ? ` ・ ${displayedEpisode.ttsEngineLabel}` : ''}
                 </div>
                 <h3 className="np-title">{displayedEpisode.title}</h3>
                 <p className="np-subtitle">{deriveEpisodeSubtitle(displayedEpisode)}</p>
@@ -335,6 +388,15 @@ export function PlayerPanel({
             <div className="np-actions-strip">
               <button
                 type="button"
+                className={`btn-secondary btn-compact ${showResynth ? 'is-active' : ''}`}
+                disabled={isJobRunning || displayedEpisode.chapters.length === 0}
+                onClick={() => setShowResynth((v) => !v)}
+                title="同じ台本を使って別のTTS・モデルで音声を再作成"
+              >
+                🎙 別TTSで再合成
+              </button>
+              <button
+                type="button"
                 className="btn-secondary btn-compact"
                 disabled={isExporting || !hasAudioExportable}
                 onClick={onDownloadAudio}
@@ -392,6 +454,174 @@ export function PlayerPanel({
                 🎬 MP4
               </button>
             </div>
+
+            {showResynth && (
+              <div
+                className="n-card"
+                style={{ marginTop: 10, padding: '10px 12px' }}
+                aria-label="同じ台本で別TTS・モデル再合成"
+              >
+                <div className="card-head-row" style={{ marginBottom: 6 }}>
+                  <strong>🎙 同じ台本で別モデル / TTS 再作成</strong>
+                  <button
+                    type="button"
+                    className="btn-ghost"
+                    onClick={() => setShowResynth(false)}
+                    aria-label="再合成パネルを閉じる"
+                  >
+                    ✕
+                  </button>
+                </div>
+
+                <div className="field-row">
+                  <label className="field-label" htmlFor="resynth-tts-mode">
+                    音声合成エンジン (TTS)
+                  </label>
+                  <select
+                    id="resynth-tts-mode"
+                    className="field-select"
+                    value={resynthTtsMode}
+                    onChange={(e) => setResynthTtsMode(e.target.value as TTSMode)}
+                  >
+                    <option value="gemini_tts">Gemini Multi-Speaker TTS（自然な2人掛け合い）</option>
+                    <option value="openai_tts">OpenAI TTS（話者別MP3合成）</option>
+                    <option value="macos_speech">macOS Web Speech（無料・ローカル日本語）</option>
+                  </select>
+                </div>
+
+                {resynthTtsMode === 'gemini_tts' && (
+                  <>
+                    <div className="field-row">
+                      <label className="field-label" htmlFor="resynth-gemini-model">
+                        Gemini TTS モデル
+                      </label>
+                      <select
+                        id="resynth-gemini-model"
+                        className="field-select"
+                        value={resynthGeminiModel}
+                        onChange={(e) => setResynthGeminiModel(e.target.value)}
+                      >
+                        {GEMINI_TTS_MODELS.map((m) => (
+                          <option key={m.id} value={m.id}>
+                            {m.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="grid-2">
+                      <div className="field-row">
+                        <label className="field-label" htmlFor="resynth-host-a-voice">
+                          Host A 声色
+                        </label>
+                        <select
+                          id="resynth-host-a-voice"
+                          className="field-select"
+                          value={resynthHostAVoice}
+                          onChange={(e) => setResynthHostAVoice(e.target.value)}
+                        >
+                          {GEMINI_VOICES.map((v) => (
+                            <option key={v} value={v}>
+                              {v}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="field-row">
+                        <label className="field-label" htmlFor="resynth-host-b-voice">
+                          Host B 声色
+                        </label>
+                        <select
+                          id="resynth-host-b-voice"
+                          className="field-select"
+                          value={resynthHostBVoice}
+                          onChange={(e) => setResynthHostBVoice(e.target.value)}
+                        >
+                          {GEMINI_VOICES.map((v) => (
+                            <option key={v} value={v}>
+                              {v}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                  </>
+                )}
+
+                {resynthTtsMode === 'openai_tts' && (
+                  <div className="field-row">
+                    <label className="field-label" htmlFor="resynth-openai-model">
+                      OpenAI TTS モデル
+                    </label>
+                    <select
+                      id="resynth-openai-model"
+                      className="field-select"
+                      value={resynthOpenAiModel}
+                      onChange={(e) => setResynthOpenAiModel(e.target.value)}
+                    >
+                      {OPENAI_TTS_MODELS.map((m) => (
+                        <option key={m.id} value={m.id}>
+                          {m.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                <div className="toggle-row" style={{ marginTop: 6 }}>
+                  <span>元の音声を残して別エピソードとして作成</span>
+                  <input
+                    type="checkbox"
+                    checked={resynthDuplicate}
+                    onChange={(e) => setResynthDuplicate(e.target.checked)}
+                  />
+                </div>
+
+                {missingResynthKey ? (
+                  <div style={{ marginTop: 8 }}>
+                    <p className="field-hint" style={{ marginBottom: 6 }}>
+                      {resynthTtsMode === 'openai_tts'
+                        ? 'OpenAI API Key が未設定です。ワンクリック連携でキーを設定できます。'
+                        : 'Gemini API Key が未設定です。ワンクリック連携でキーを設定できます。'}
+                    </p>
+                    <button
+                      type="button"
+                      className="btn-primary"
+                      style={{ width: '100%' }}
+                      onClick={() =>
+                        void (resynthTtsMode === 'openai_tts'
+                          ? onStartOpenAiKeySetup()
+                          : onStartGeminiKeySetup())
+                      }
+                    >
+                      {resynthTtsMode === 'openai_tts'
+                        ? '⚡ OpenAI でワンクリック連携'
+                        : '⚡ AI Studio でワンクリック連携'}
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    style={{ width: '100%', marginTop: 8 }}
+                    disabled={isJobRunning}
+                    onClick={() => {
+                      setShowResynth(false);
+                      void onResynthesizeEpisode({
+                        episodeId: displayedEpisode.id,
+                        ttsMode: resynthTtsMode,
+                        geminiTtsModel: resynthGeminiModel,
+                        openaiTtsModel: resynthOpenAiModel,
+                        hostAVoice: resynthHostAVoice,
+                        hostBVoice: resynthHostBVoice,
+                        mode: resynthDuplicate ? 'duplicate' : 'overwrite',
+                      });
+                    }}
+                  >
+                    🎙 この台本で音声を再作成
+                  </button>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Chapter Pills & Dynamic Lyrics-style Script */}
