@@ -14,11 +14,15 @@ interface SettingsPanelProps {
   settings: ExtensionSettings;
   currentBuild: BuildMeta | null;
   pendingBuild: BuildMeta | null;
+  isJobRunning?: boolean;
   isVerifyingKey: boolean;
   keyVerifyStatus: { ok: boolean; text: string } | null;
+  isOrganizingGeminiNotebook?: boolean;
+  geminiNotebookStatus?: { ok: boolean; text: string } | null;
   onPatchSettings: (patch: Partial<ExtensionSettings>) => Promise<void>;
   onStartGeminiKeySetup: () => Promise<void>;
   onVerifyGeminiKey: () => Promise<void>;
+  onOrganizeGeminiNotebook?: () => Promise<void>;
   onCreateDemo: () => Promise<void>;
   onGoToPatrol: () => void;
   onRevokeConsent?: () => void;
@@ -28,11 +32,15 @@ export function SettingsPanel({
   settings,
   currentBuild,
   pendingBuild,
+  isJobRunning,
   isVerifyingKey,
   keyVerifyStatus,
+  isOrganizingGeminiNotebook,
+  geminiNotebookStatus,
   onPatchSettings,
   onStartGeminiKeySetup,
   onVerifyGeminiKey,
+  onOrganizeGeminiNotebook,
   onCreateDemo,
   onGoToPatrol,
   onRevokeConsent,
@@ -112,6 +120,40 @@ export function SettingsPanel({
             </button>
           </p>
         )}
+
+        {(typeof __AGENTCAST_TARGET__ === 'undefined' || __AGENTCAST_TARGET__ === 'main') &&
+          settings.aiMode === 'web_gemini' &&
+          onOrganizeGeminiNotebook && (
+            <div className="field-row">
+              <label className="field-label">
+                Gemini ノートブック整理（agentcast）
+              </label>
+              <p className="field-hint" style={{ marginTop: 2, marginBottom: 6 }}>
+                新規作成した台本は自動で「agentcast」ノートブックに追加されます。過去の台本も一括で整理できます。
+              </p>
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={Boolean(isOrganizingGeminiNotebook || isJobRunning)}
+                onClick={() => void onOrganizeGeminiNotebook()}
+              >
+                {isOrganizingGeminiNotebook
+                  ? '過去の台本を整理中…'
+                  : '📓 過去の台本を「agentcast」ノートブックに整理'}
+              </button>
+              {geminiNotebookStatus && (
+                <p
+                  className="field-hint"
+                  style={{
+                    marginTop: 6,
+                    color: geminiNotebookStatus.ok ? 'var(--accent-sage)' : 'var(--danger-soft)',
+                  }}
+                >
+                  {geminiNotebookStatus.text}
+                </p>
+              )}
+            </div>
+          )}
 
         {(settings.aiMode === 'gemini_api' || settings.ttsMode === 'gemini_tts') && (
           <div className="field-row">

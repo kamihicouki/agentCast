@@ -45,7 +45,12 @@ import {
   generateScriptWithOpenAI,
   synthesizeChapterWithOpenAITts,
 } from '../../providers/openai-api';
-import { generateScriptViaWebSession } from '../../providers/personal-only/web-llm-bridge';
+import {
+  AGENTCAST_NOTEBOOK_NAME,
+  generateScriptViaWebSession,
+  organizePastGeminiScriptsToNotebook,
+  runPromptViaWebSession,
+} from '../../providers/personal-only/web-llm-bridge';
 import {
   getDevBuildStatus,
   startDevAutoReloader,
@@ -58,7 +63,6 @@ import {
   injectXPublishHelper,
   injectYouTubePublishHelper,
 } from '../../providers/personal-only/publish-helpers';
-import { runPromptViaWebSession } from '../../providers/personal-only/web-llm-bridge';
 import { generateTextWithGemini } from '../../providers/gemini-api';
 import { generateTextWithOpenAI } from '../../providers/openai-api';
 import {
@@ -1238,7 +1242,7 @@ const dataOperations = new Set<RuntimeRequest['type']>([
   'GEMINI_KEY_CAPTURED', 'VERIFY_GEMINI_KEY', 'START_PUBLISH_JOB', 'GET_PENDING_PUBLISH_JOB',
   'CLEAR_PENDING_PUBLISH_JOB', 'RADAR_CHECK', 'RADAR_IMPORT_YOUTUBE_SUBS',
   'RADAR_IMPORT_X_FOLLOWING', 'RADAR_ADD_TARGET', 'RADAR_GENERATE_EPISODE',
-  'SUMMARIZE_YOUTUBE_VIDEO', 'SUMMARIZE_ACTIVE_YOUTUBE_TAB',
+  'SUMMARIZE_YOUTUBE_VIDEO', 'SUMMARIZE_ACTIVE_YOUTUBE_TAB', 'ORGANIZE_GEMINI_NOTEBOOK',
 ]);
 
 chrome.runtime.onMessage.addListener((message: RuntimeRequest, sender, sendResponse) => {
@@ -1706,6 +1710,55 @@ function handleRequest(
     case 'GET_DIGEST_PROGRESS':
       sendResponse({ ok: true, progress: Object.fromEntries(digestInProgress) });
       return false;
+
+    case 'GEMINI_NOTEBOOK_ORGANIZE_PROGRESS':
+      if (isJobRunning && message.stage) {
+        currentJobMessage = message.stage;
+        broadcastEvent({
+          type: 'JOB_STATUS',
+          running: true,
+          message: currentJobMessage,
+          error: '',
+        });
+      }
+      sendResponse({ ok: true });
+      return false;
+
+    case 'ORGANIZE_GEMINI_NOTEBOOK':
+      if (isJobRunning) {
+        sendResponse({ ok: false, error: '現在別の巡回・番組生成または整理が実行中です。' });
+        return false;
+      }
+      void (async () => {
+        const notebookName = (message.notebookName || AGENTCAST_NOTEBOOK_NAME).trim() || AGENTCAST_NOTEBOOK_NAME;
+        isJobRunning = true;
+        currentJobMessage = `Gemini「${notebookName}」ノートブックの整理を開始しています...`;
+        lastJobError = '';
+        broadcastEvent({
+          type: 'JOB_STATUS',
+          running: true,
+          message: currentJobMessage,
+          error: '',
+        });
+        try {
+          const result = await organizePastGeminiScriptsToNotebook(notebookName);
+          sendResponse({ ok: true, result });
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          lastJobError = errMsg;
+          sendResponse({ ok: false, error: errMsg });
+        } finally {
+          isJobRunning = false;
+          currentJobMessage = '';
+          broadcastEvent({
+            type: 'JOB_STATUS',
+            running: false,
+            message: '',
+            error: lastJobError,
+          });
+        }
+      })();
+      return true;
 
     default:
       return false;

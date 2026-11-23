@@ -76,7 +76,17 @@ export type RuntimeRequest =
   | { type: 'RADAR_GENERATE_EPISODE'; checkFirst?: boolean }
   | { type: 'SUMMARIZE_YOUTUBE_VIDEO'; videoUrl: string; force?: boolean }
   | { type: 'SUMMARIZE_ACTIVE_YOUTUBE_TAB' }
-  | { type: 'GET_DIGEST_PROGRESS' };
+  | { type: 'GET_DIGEST_PROGRESS' }
+  | { type: 'ORGANIZE_GEMINI_NOTEBOOK'; notebookName?: string }
+  | {
+      type: 'GEMINI_NOTEBOOK_ORGANIZE_PROGRESS';
+      scanned: number;
+      total: number;
+      added: number;
+      already: number;
+      skipped: number;
+      stage: string;
+    };
 
 export interface PendingPublishJob {
   id: string;

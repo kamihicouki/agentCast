@@ -174,6 +174,11 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
   const [keyVerifyStatus, setKeyVerifyStatus] = useState<{ ok: boolean; text: string } | null>(
     null
   );
+  const [isOrganizingGeminiNotebook, setIsOrganizingGeminiNotebook] = useState<boolean>(false);
+  const [geminiNotebookStatus, setGeminiNotebookStatus] = useState<{
+    ok: boolean;
+    text: string;
+  } | null>(null);
 
   const activeTurnRef = useRef<HTMLDivElement | null>(null);
 
@@ -661,6 +666,44 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
     }
   };
 
+  const handleOrganizeGeminiNotebook = async () => {
+    setErrorBanner('');
+    setIsOrganizingGeminiNotebook(true);
+    setGeminiNotebookStatus(null);
+    try {
+      const res = await chrome.runtime.sendMessage({
+        type: 'ORGANIZE_GEMINI_NOTEBOOK',
+        notebookName: 'agentcast',
+      } satisfies RuntimeRequest);
+      if (res?.ok && res?.result) {
+        const r = res.result as {
+          notebookName: string;
+          createdNotebook: boolean;
+          totalScanned: number;
+          addedCount: number;
+          alreadyCount: number;
+          skippedCount: number;
+          failedCount: number;
+        };
+        const createdNote = r.createdNotebook ? '（ノートブック新規作成）' : '';
+        const failNote = r.failedCount > 0 ? `・失敗${r.failedCount}件` : '';
+        const summary = `完了${createdNote}：${r.addedCount}件を「${r.notebookName}」に追加（既存${r.alreadyCount}件・対象外${r.skippedCount}件${failNote}／全${r.totalScanned}件スキャン）`;
+        setGeminiNotebookStatus({ ok: true, text: summary });
+        showToast(`過去の台本 ${r.addedCount}件を「${r.notebookName}」ノートブックに整理しました`);
+        return;
+      }
+      const errMsg = res?.error || 'Gemini ノートブックの整理に失敗しました。';
+      setGeminiNotebookStatus({ ok: false, text: errMsg });
+      setErrorBanner(errMsg);
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      setGeminiNotebookStatus({ ok: false, text: errMsg });
+      setErrorBanner(errMsg);
+    } finally {
+      setIsOrganizingGeminiNotebook(false);
+    }
+  };
+
   const handleRemoveQueueItem = async (id: string) => {
     await db.feedItems.delete(id);
     setQueue((prev) => prev.filter((item) => item.id !== id));
@@ -783,11 +826,15 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
             settings={settings}
             currentBuild={currentBuild}
             pendingBuild={pendingBuild}
+            isJobRunning={isJobRunning}
             isVerifyingKey={isVerifyingKey}
             keyVerifyStatus={keyVerifyStatus}
+            isOrganizingGeminiNotebook={isOrganizingGeminiNotebook}
+            geminiNotebookStatus={geminiNotebookStatus}
             onPatchSettings={handlePatchSettings}
             onStartGeminiKeySetup={handleStartGeminiKeySetup}
             onVerifyGeminiKey={handleVerifyGeminiKey}
+            onOrganizeGeminiNotebook={handleOrganizeGeminiNotebook}
             onCreateDemo={handleCreateDemo}
             onGoToPatrol={() => setTab('patrol')}
             onRevokeConsent={onRevokeConsent ? () => {
