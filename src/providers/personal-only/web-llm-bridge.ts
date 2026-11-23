@@ -14,6 +14,25 @@ export const AGENTCAST_NOTEBOOK_NAME = 'agentcast';
 export interface WebSessionPromptOptions {
   /** When provider is 'gemini', ensure this notebook exists and add the generated chat to it. */
   notebookName?: string;
+  /** Optional progress callback invoked from the Service Worker polling loop. */
+  onProgress?: (detail: string) => void;
+}
+
+export interface WebSessionSubmitResult {
+  ok: boolean;
+  error?: string;
+  initialCount: number;
+  initialLastText: string;
+}
+
+export interface WebSessionPollState {
+  ok: boolean;
+  error?: string;
+  responseText: string;
+  hasCompleteJson: boolean;
+  isGenerating: boolean;
+  hasCompletionUi: boolean;
+  responseCount: number;
 }
 
 export interface GeminiNotebookCurrentChatResult {
@@ -75,14 +94,17 @@ async function waitForTabComplete(tabId: number, timeoutMs = 20000): Promise<voi
 }
 
 /**
- * Injected into a signed-in chatgpt.com or gemini.google.com background tab (main personal branch only).
- * Submits the podcast JSON prompt using the user's existing Plus/Pro/Ultra web session and waits for the reply.
+ * Injected once into a signed-in chatgpt.com or gemini.google.com tab (main personal branch only).
+ * Verifies sign-in state, snapshots existing response count/text, enters the prompt, and clicks Send.
+ * Exported for jsdom unit testing.
  */
-async function runDomPromptInWebSession(
+export async function runDomSubmitPromptInWebSession(
   provider: 'chatgpt' | 'gemini',
   promptText: string
-): Promise<{ ok: boolean; responseText?: string; error?: string }> {
+): Promise<WebSessionSubmitResult> {
   const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const isJsdom = typeof navigator !== 'undefined' && /jsdom/i.test(navigator.userAgent || '');
+  const d = (ms: number) => (isJsdom ? Math.min(ms, 15) : ms);
 
   // Detect sign-in state
   const href = window.location.href.toLowerCase();
@@ -94,10 +116,12 @@ async function runDomPromptInWebSession(
     return {
       ok: false,
       error: `${provider === 'chatgpt' ? 'ChatGPT' : 'Gemini'} にブラウザでログインしてから再実行してください。`,
+      initialCount: 0,
+      initialLastText: '',
     };
   }
 
-  // Wait up to 8s for composer input to mount
+  // Wait up to 10s for composer input to mount
   const inputSelectors =
     provider === 'chatgpt'
       ? ['#prompt-textarea', 'div[contenteditable="true"][id="prompt-textarea"]', 'textarea']
@@ -109,7 +133,7 @@ async function runDomPromptInWebSession(
         ];
 
   let composer: HTMLElement | null = null;
-  for (let i = 0; i < 20; i++) {
+  for (let i = 0; i < 25; i++) {
     for (const sel of inputSelectors) {
       const el = document.querySelector<HTMLElement>(sel);
       if (el) {
@@ -118,22 +142,29 @@ async function runDomPromptInWebSession(
       }
     }
     if (composer) break;
-    await wait(400);
+    await wait(d(400));
   }
 
   if (!composer) {
     return {
       ok: false,
       error: `${provider === 'chatgpt' ? 'ChatGPT' : 'Gemini'} の入力欄が見つかりませんでした（ログイン状態をご確認ください）。`,
+      initialCount: 0,
+      initialLastText: '',
     };
   }
 
-  const responseSelector =
+  const containerSelector =
     provider === 'chatgpt'
       ? '[data-message-author-role="assistant"]'
-      : 'message-content, model-response, .model-response-text';
+      : 'model-response, message-content, .model-response-text';
 
-  const initialCount = document.querySelectorAll(responseSelector).length;
+  const existingNodes = Array.from(document.querySelectorAll<HTMLElement>(containerSelector));
+  const initialCount = existingNodes.length;
+  const initialLastText =
+    existingNodes.length > 0
+      ? (existingNodes[existingNodes.length - 1]?.textContent || '').trim().slice(0, 400)
+      : '';
 
   composer.focus();
   if (composer instanceof HTMLTextAreaElement) {
@@ -145,10 +176,12 @@ async function runDomPromptInWebSession(
     const p = document.createElement('p');
     p.textContent = promptText;
     composer.appendChild(p);
-    composer.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: promptText }));
+    composer.dispatchEvent(
+      new InputEvent('input', { bubbles: true, inputType: 'insertText', data: promptText })
+    );
   }
 
-  await wait(500);
+  await wait(d(500));
 
   const sendSelectors =
     provider === 'chatgpt'
@@ -167,7 +200,7 @@ async function runDomPromptInWebSession(
   let sendBtn: HTMLButtonElement | null = null;
   for (const sel of sendSelectors) {
     const btn = document.querySelector<HTMLButtonElement>(sel);
-    if (btn && !btn.disabled) {
+    if (btn && !btn.disabled && btn.getAttribute('aria-disabled') !== 'true') {
       sendBtn = btn;
       break;
     }
@@ -181,32 +214,341 @@ async function runDomPromptInWebSession(
     );
   }
 
-  // Poll until assistant reply finishes streaming (text stabilizes for ~2.8s and includes closing brace)
-  let lastLen = 0;
-  let stableTicks = 0;
-  for (let tick = 0; tick < 110; tick++) {
-    await wait(1000);
-    const nodes = document.querySelectorAll(responseSelector);
-    if (nodes.length <= initialCount) continue;
+  return {
+    ok: true,
+    initialCount,
+    initialLastText,
+  };
+}
 
-    const latestNode = nodes[nodes.length - 1];
-    const txt = (latestNode?.textContent || '').trim();
-    if (!txt) continue;
+/**
+ * Synchronous DOM snapshot reader invoked repeatedly from the Service Worker polling loop.
+ * Avoids background-tab setTimeout throttling and long-pending executeScript calls, and robustly
+ * extracts Gemini/ChatGPT JSON responses even when thinking panels, trailing empty nodes, or
+ * feedback widgets are present in the DOM.
+ * Exported for jsdom unit testing.
+ */
+export function runDomReadWebSessionState(
+  provider: 'chatgpt' | 'gemini',
+  initialCount: number,
+  initialLastText: string
+): WebSessionPollState {
+  const isJsdom = typeof navigator !== 'undefined' && /jsdom/i.test(navigator.userAgent || '');
 
-    if (txt.length === lastLen && txt.includes('{') && txt.includes('}')) {
-      stableTicks++;
-      if (stableTicks >= 3) {
-        return { ok: true, responseText: txt };
+  const href = window.location.href.toLowerCase();
+  if (
+    href.includes('/auth/login') ||
+    href.includes('accounts.google.com') ||
+    document.querySelector('a[href*="/auth/login"], button[data-testid="login-button"]')
+  ) {
+    return {
+      ok: false,
+      error: `${provider === 'chatgpt' ? 'ChatGPT' : 'Gemini'} のログインが切れました。再ログインしてからお試しください。`,
+      responseText: '',
+      hasCompleteJson: false,
+      isGenerating: false,
+      hasCompletionUi: false,
+      responseCount: 0,
+    };
+  }
+
+  const isVisible = (el: Element | null): boolean => {
+    if (!(el instanceof HTMLElement)) return false;
+    if (el.getAttribute('aria-hidden') === 'true') return false;
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+      return false;
+    }
+    if (!isJsdom) {
+      const rect = el.getBoundingClientRect();
+      if (rect.width === 0 && rect.height === 0) return false;
+    }
+    return true;
+  };
+
+  const analyzeJson = (raw: string): { complete: boolean; hasScriptKeys: boolean } => {
+    if (!raw || !raw.includes('{') || !raw.includes('}')) {
+      return { complete: false, hasScriptKeys: false };
+    }
+
+    const tryParseObject = (candidate: string): { complete: boolean; hasScriptKeys: boolean } | null => {
+      try {
+        const parsed = JSON.parse(candidate);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          const obj = parsed as Record<string, unknown>;
+          const hasScriptKeys =
+            Array.isArray(obj.chapters) ||
+            Array.isArray(obj.turns) ||
+            typeof obj.title === 'string';
+          return { complete: true, hasScriptKeys };
+        }
+      } catch {
+        // Not valid JSON yet
       }
+      return null;
+    };
+
+    // 1. Check markdown ```json ... ``` blocks first
+    const fenceRegex = /```(?:json)?\s*([\s\S]*?)```/gi;
+    let fenceMatch: RegExpExecArray | null;
+    while ((fenceMatch = fenceRegex.exec(raw)) !== null) {
+      const res = tryParseObject(fenceMatch[1].trim());
+      if (res) return res;
+    }
+
+    // 2. Scan for a balanced top-level JSON object starting from the first '{'
+    const firstBrace = raw.indexOf('{');
+    if (firstBrace < 0) return { complete: false, hasScriptKeys: false };
+
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let i = firstBrace; i < raw.length; i++) {
+      const ch = raw[i];
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (ch === '\\') {
+          escaped = true;
+        } else if (ch === '"') {
+          inString = false;
+        }
+        continue;
+      }
+      if (ch === '"') {
+        inString = true;
+      } else if (ch === '{') {
+        depth++;
+      } else if (ch === '}') {
+        depth--;
+        if (depth === 0) {
+          const slice = raw.slice(firstBrace, i + 1);
+          const res = tryParseObject(slice);
+          if (res) return res;
+          break;
+        }
+      }
+    }
+
+    return { complete: false, hasScriptKeys: false };
+  };
+
+  const skipInsideSelector =
+    'user-query, .query-text, [data-test-id*="user-query"], model-thoughts, .thoughts-container, .thought-content, [data-test-id*="thought"], .thinking-container';
+
+  const extractCleanText = (node: Element): string => {
+    const clone = node.cloneNode(true) as Element;
+    const stripSelectors = [
+      'model-thoughts',
+      '.thoughts-container',
+      '.thought-content',
+      '[data-test-id*="thought"]',
+      '.thinking-container',
+      'message-actions',
+      '.response-footer',
+      '.actions-container',
+      '.code-block-decoration',
+      '.code-block-header',
+      'button',
+    ];
+    for (const sel of stripSelectors) {
+      clone.querySelectorAll(sel).forEach((el) => el.remove());
+    }
+    return (clone.textContent || '').trim();
+  };
+
+  const candidates: string[] = [];
+  const seenTexts = new Set<string>();
+  const pushCandidate = (txt: string) => {
+    const trimmed = txt.trim();
+    if (!trimmed) return;
+    if (seenTexts.has(trimmed)) return;
+    seenTexts.add(trimmed);
+    candidates.push(trimmed);
+  };
+
+  let responseCount = 0;
+  let latestResponseContainer: Element | null = null;
+
+  if (provider === 'chatgpt') {
+    const nodes = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
+    responseCount = nodes.length;
+    latestResponseContainer = nodes[nodes.length - 1] || null;
+    for (let i = nodes.length - 1; i >= 0; i--) {
+      const node = nodes[i];
+      const codeBlocks = Array.from(node.querySelectorAll('pre code'));
+      for (let j = codeBlocks.length - 1; j >= 0; j--) {
+        pushCandidate(codeBlocks[j].textContent || '');
+      }
+      pushCandidate(node.textContent || '');
+    }
+  } else {
+    const modelResponses = Array.from(document.querySelectorAll('model-response'));
+    const allLegacy = Array.from(
+      document.querySelectorAll('model-response, message-content, .model-response-text')
+    );
+    responseCount = allLegacy.length;
+    latestResponseContainer = modelResponses[modelResponses.length - 1] || null;
+
+    // Prioritize elements inside the latest model-response turns
+    for (let i = modelResponses.length - 1; i >= 0; i--) {
+      const mr = modelResponses[i];
+      const codeBlocks = Array.from(mr.querySelectorAll('pre code, code-block code'));
+      for (let j = codeBlocks.length - 1; j >= 0; j--) {
+        if (codeBlocks[j].closest(skipInsideSelector)) continue;
+        pushCandidate(codeBlocks[j].textContent || '');
+      }
+      const msgContents = Array.from(
+        mr.querySelectorAll('message-content, .model-response-text, .markdown')
+      );
+      for (let j = msgContents.length - 1; j >= 0; j--) {
+        if (msgContents[j].closest(skipInsideSelector)) continue;
+        pushCandidate(extractCleanText(msgContents[j]));
+      }
+      pushCandidate(extractCleanText(mr));
+    }
+
+    // Fallback scan for Gemini layouts without <model-response> wrapper
+    const fallbackNodes = Array.from(
+      document.querySelectorAll(
+        'message-content, .model-response-text, structured-content-container, response-container, pre code'
+      )
+    );
+    for (let i = fallbackNodes.length - 1; i >= 0; i--) {
+      const node = fallbackNodes[i];
+      if (node.closest(skipInsideSelector)) continue;
+      pushCandidate(extractCleanText(node));
+    }
+  }
+
+  // Filter out stale pre-submit text if DOM node count hasn't increased
+  const filteredCandidates = candidates.filter((txt) => {
+    if (
+      responseCount <= initialCount &&
+      initialLastText &&
+      txt.slice(0, 400) === initialLastText
+    ) {
+      return false;
+    }
+    return true;
+  });
+
+  // Pick best candidate:
+  // 1) Complete parseable JSON with podcast script keys ("chapters" / "turns" / "title")
+  // 2) Complete parseable JSON object
+  // 3) Streaming JSON fragment containing '{' and '"' (longest)
+  // 4) Latest non-empty response text
+  let bestText = '';
+  let bestComplete = false;
+  let bestScore = -1;
+
+  for (const txt of filteredCandidates) {
+    const info = analyzeJson(txt);
+    let score = 1;
+    if (info.complete && info.hasScriptKeys) {
+      score = 400 + Math.min(txt.length, 50000) / 100000;
+    } else if (info.complete) {
+      score = 300 + Math.min(txt.length, 50000) / 100000;
+    } else if (txt.includes('{') && txt.includes('"')) {
+      score = 200 + Math.min(txt.length, 50000) / 100000;
     } else {
-      lastLen = txt.length;
-      stableTicks = 0;
+      score = 100;
+    }
+    if (score > bestScore) {
+      bestScore = score;
+      bestText = txt;
+      bestComplete = info.complete;
+    }
+  }
+
+  // Detect whether generation is currently in progress
+  let isGenerating = false;
+  if (provider === 'chatgpt') {
+    const stopEls = document.querySelectorAll(
+      'button[data-testid="stop-button"], button[aria-label*="Stop" i], button[aria-label*="停止"]'
+    );
+    for (const el of Array.from(stopEls)) {
+      if (isVisible(el)) {
+        isGenerating = true;
+        break;
+      }
+    }
+  } else {
+    const stopSelectors = [
+      'button[aria-label*="停止"]',
+      'button[aria-label*="Stop" i]',
+      'button[mattooltip*="停止"]',
+      'button[mattooltip*="Stop" i]',
+      'button[data-test-id*="stop"]',
+      '.stop-icon',
+    ];
+    for (const sel of stopSelectors) {
+      const el = document.querySelector(sel);
+      if (el && isVisible(el)) {
+        isGenerating = true;
+        break;
+      }
+    }
+    if (!isGenerating) {
+      const buttons = Array.from(document.querySelectorAll('button'));
+      for (const btn of buttons) {
+        if (!isVisible(btn)) continue;
+        const icon = btn.querySelector('mat-icon, .mat-icon, .google-symbols');
+        const iconTxt = (icon?.textContent || '').trim().toLowerCase();
+        if (iconTxt === 'stop' || iconTxt === 'stop_circle') {
+          isGenerating = true;
+          break;
+        }
+      }
+    }
+    if (!isGenerating && latestResponseContainer) {
+      const busy = latestResponseContainer.querySelector('[aria-busy="true"]');
+      if (busy && isVisible(busy)) {
+        isGenerating = true;
+      }
+    }
+  }
+
+  // Detect post-generation completion action buttons (thumbs up/down, copy, etc.)
+  let hasCompletionUi = false;
+  if (provider === 'chatgpt') {
+    const actionEls = document.querySelectorAll(
+      'button[data-testid="copy-turn-action-button"], button[data-testid="good-response-turn-action-button"]'
+    );
+    for (const el of Array.from(actionEls)) {
+      if (isVisible(el)) {
+        hasCompletionUi = true;
+        break;
+      }
+    }
+  } else {
+    const scope: ParentNode = latestResponseContainer || document;
+    const completionSelectors = [
+      'message-actions button',
+      '.response-footer button',
+      'button[aria-label*="コピー"]',
+      'button[aria-label*="Copy" i]',
+      'button[aria-label*="高評価"]',
+      'button[aria-label*="Good response" i]',
+      'button[aria-label*="低評価"]',
+      'button[aria-label*="Bad response" i]',
+    ];
+    for (const sel of completionSelectors) {
+      const els = Array.from(scope.querySelectorAll(sel));
+      if (els.some((el) => isVisible(el))) {
+        hasCompletionUi = true;
+        break;
+      }
     }
   }
 
   return {
-    ok: false,
-    error: 'Webセッションからの応答待機がタイムアウトしました。',
+    ok: true,
+    responseText: bestText,
+    hasCompleteJson: bestComplete,
+    isGenerating,
+    hasCompletionUi,
+    responseCount,
   };
 }
 
@@ -1574,6 +1916,7 @@ export async function runPromptViaWebSession(
   const targetUrl =
     provider === 'chatgpt' ? 'https://chatgpt.com/' : 'https://gemini.google.com/app';
 
+  options?.onProgress?.('タブを開いています...');
   const tab = await chrome.tabs.create({ url: targetUrl, active: false });
   if (!tab.id) {
     throw new Error('バックグラウンドタブの作成に失敗しました。');
@@ -1583,40 +1926,145 @@ export async function runPromptViaWebSession(
     await waitForTabComplete(tab.id, 22000);
     await sleep(1800);
 
-    const execResults = await chrome.scripting.executeScript({
+    options?.onProgress?.('プロンプトを送信中...');
+    const submitExec = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      func: runDomPromptInWebSession,
+      func: runDomSubmitPromptInWebSession,
       args: [provider, prompt],
     });
 
-    const payload = execResults?.[0]?.result;
-    if (!payload?.ok || !payload.responseText) {
-      throw new Error(payload?.error || 'Webセッション経由での生成に失敗しました。');
+    const submitPayload = submitExec?.[0]?.result;
+    if (!submitPayload?.ok) {
+      throw new Error(submitPayload?.error || 'Webセッションへのプロンプト送信に失敗しました。');
+    }
+
+    // Poll from the Service Worker (immune to background-tab setTimeout throttling and long-pending executeScript)
+    const POLL_INTERVAL_MS = 1500;
+    const TOTAL_TIMEOUT_MS = 240_000;
+    const NO_RESPONSE_TIMEOUT_MS = 90_000;
+
+    const startTime = Date.now();
+    let lastText = '';
+    let stablePolls = 0;
+    let consecutiveScriptErrors = 0;
+    let responseText = '';
+
+    while (Date.now() - startTime < TOTAL_TIMEOUT_MS) {
+      await sleep(POLL_INTERVAL_MS);
+
+      const elapsedSec = Math.round((Date.now() - startTime) / 1000);
+      const tabInfo = await chrome.tabs.get(tab.id).catch(() => null);
+      if (!tabInfo) {
+        throw new Error('Webセッションのタブが閉じられたため生成を中断しました。');
+      }
+
+      let pollState: WebSessionPollState | undefined;
+      try {
+        const pollExec = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: runDomReadWebSessionState,
+          args: [provider, submitPayload.initialCount, submitPayload.initialLastText],
+        });
+        pollState = pollExec?.[0]?.result;
+        consecutiveScriptErrors = 0;
+      } catch (err) {
+        consecutiveScriptErrors++;
+        if (consecutiveScriptErrors >= 6) {
+          throw new Error(
+            `Webセッションの応答読み取りに失敗しました: ${err instanceof Error ? err.message : String(err)}`
+          );
+        }
+        continue;
+      }
+
+      if (!pollState) continue;
+      if (!pollState.ok) {
+        throw new Error(pollState.error || 'Webセッション経由での生成に失敗しました。');
+      }
+
+      const txt = pollState.responseText;
+      if (!txt) {
+        options?.onProgress?.(`応答待機中 (${elapsedSec}秒)`);
+        if (Date.now() - startTime >= NO_RESPONSE_TIMEOUT_MS) {
+          throw new Error('Webセッションからの応答が開始されませんでした（タイムアウト）。');
+        }
+        continue;
+      }
+
+      if (txt === lastText) {
+        stablePolls++;
+      } else {
+        lastText = txt;
+        stablePolls = 0;
+      }
+
+      options?.onProgress?.(
+        pollState.isGenerating
+          ? `応答生成中 ${txt.length.toLocaleString()}文字 (${elapsedSec}秒)`
+          : `応答確認中 ${txt.length.toLocaleString()}文字 (${elapsedSec}秒)`
+      );
+
+      // Fast completion: valid balanced JSON + generation finished
+      if (pollState.hasCompleteJson && !pollState.isGenerating) {
+        if ((pollState.hasCompletionUi && stablePolls >= 1) || stablePolls >= 2) {
+          responseText = txt;
+          break;
+        }
+      }
+
+      // Guard against false-positive isGenerating selector when complete JSON has stabilized
+      if (pollState.hasCompleteJson && stablePolls >= 5) {
+        responseText = txt;
+        break;
+      }
+
+      // Fallback when response is not strict JSON (e.g. minor syntax quirk) but has stabilized after generation stopped
+      if (!pollState.isGenerating && txt.includes('{') && txt.includes('}') && stablePolls >= 4) {
+        responseText = txt;
+        break;
+      }
+    }
+
+    if (!responseText) {
+      // If we timed out with a complete JSON already in hand, still use it rather than discarding
+      if (lastText && lastText.includes('{') && lastText.includes('}')) {
+        responseText = lastText;
+      } else {
+        throw new Error('Webセッションからの応答待機がタイムアウトしました。');
+      }
     }
 
     // Best-effort: add newly created Gemini script chat to the designated notebook (e.g. "agentcast")
+    // Guarded by a hard 15s timeout so notebook UI changes can never block returning the script.
     if (provider === 'gemini' && options?.notebookName) {
       try {
-        await sleep(1500);
+        options?.onProgress?.(`「${options.notebookName}」ノートブックに整理中...`);
+        await sleep(1200);
         const latestTab = await chrome.tabs.get(tab.id).catch(() => null);
         const chatIdHint = extractGeminiChatIdFromUrl(latestTab?.url);
-        const nbExec = await chrome.scripting.executeScript({
-          target: { tabId: tab.id },
-          func: runDomOrganizeCurrentGeminiChatToNotebook,
-          args: [options.notebookName, chatIdHint],
-        });
+        const nbExec = await Promise.race([
+          chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            func: runDomOrganizeCurrentGeminiChatToNotebook,
+            args: [options.notebookName, chatIdHint],
+          }),
+          sleep(15_000).then(() => null),
+        ]);
         const nbPayload = nbExec?.[0]?.result;
         if (!nbPayload?.ok) {
-          console.warn('[agentCast] Failed to add script chat to Gemini notebook:', nbPayload?.error);
+          console.warn(
+            '[agentCast] Failed to add script chat to Gemini notebook:',
+            nbPayload?.error || 'timed out'
+          );
         } else {
-          await sleep(600);
+          await sleep(500);
         }
       } catch (err) {
         console.warn('[agentCast] Gemini notebook organization warning:', err);
       }
     }
 
-    return payload.responseText;
+    return responseText;
   } finally {
     await chrome.tabs.remove(tab.id).catch(() => {});
   }
@@ -1662,13 +2110,13 @@ export async function generateScriptViaWebSession(
   provider: 'chatgpt' | 'gemini',
   items: FeedItem[],
   settings: ExtensionSettings,
-  promptOpts?: ScriptPromptOptions
+  promptOpts?: ScriptPromptOptions,
+  onProgress?: (detail: string) => void
 ): Promise<{ title: string; subtitle: string; chapters: EpisodeChapter[] }> {
   const prompt = buildPodcastScriptPrompt(items, settings, promptOpts);
-  const responseText = await runPromptViaWebSession(
-    provider,
-    prompt,
-    provider === 'gemini' ? { notebookName: AGENTCAST_NOTEBOOK_NAME } : undefined
-  );
+  const responseText = await runPromptViaWebSession(provider, prompt, {
+    ...(provider === 'gemini' ? { notebookName: AGENTCAST_NOTEBOOK_NAME } : {}),
+    onProgress,
+  });
   return parseGeneratedScriptJson(responseText, items, settings);
 }

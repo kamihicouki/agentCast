@@ -980,9 +980,13 @@ async function generateEpisodeFromItems(
     } else if (settings.aiMode === 'openai_api') {
       generated = await generateScriptWithOpenAI(queueItems, settings, promptOpts);
     } else if (settings.aiMode === 'web_chatgpt') {
-      generated = await generateScriptViaWebSession('chatgpt', queueItems, settings, promptOpts);
+      generated = await generateScriptViaWebSession('chatgpt', queueItems, settings, promptOpts, (detail) => {
+        updateJobProgress(`${labels.providerLabel} で番組台本を作成中... (${detail})`);
+      });
     } else {
-      generated = await generateScriptViaWebSession('gemini', queueItems, settings, promptOpts);
+      generated = await generateScriptViaWebSession('gemini', queueItems, settings, promptOpts, (detail) => {
+        updateJobProgress(`${labels.providerLabel} で番組台本を作成中... (${detail})`);
+      });
     }
 
     let effectiveTts = settings.ttsMode;
