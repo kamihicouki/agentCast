@@ -37,6 +37,7 @@ interface PatrolPanelProps {
   onClearQueue: () => Promise<void>;
   onPatchSettings: (patch: Partial<ExtensionSettings>) => Promise<void>;
   onGoToQueue: () => void;
+  onPatrolAndPlay?: () => void;
   showToast: (msg: string) => void;
   setErrorBanner: (msg: string) => void;
 }
@@ -80,6 +81,7 @@ export function PatrolPanel({
   onClearQueue,
   onPatchSettings,
   onGoToQueue,
+  onPatrolAndPlay,
   showToast,
   setErrorBanner,
 }: PatrolPanelProps) {
@@ -937,81 +939,78 @@ export function PatrolPanel({
 
   const tabQueueLabel =
     tabScope === 'active'
-      ? '＋ 今のタブを取り込む'
+      ? '今のタブをキューへ'
       : tabScope === 'all'
-        ? `＋ 全${allTabsCount}タブを取り込む`
-        : `＋ ${selectedGroup ? `${selectedGroup.tabCount}タブ` : 'グループ'}を取り込む`;
+        ? `全${allTabsCount}タブをキューへ`
+        : `${selectedGroup ? `${selectedGroup.tabCount}タブ` : 'グループ'}をキューへ`;
 
   const tabInstantLabel =
     tabScope === 'active'
-      ? '⚡ 今のタブを即番組化'
+      ? '今のタブで即番組化'
       : tabScope === 'all'
-        ? `⚡ 全${allTabsCount}タブを即番組化`
-        : `⚡ ${selectedGroup ? `${selectedGroup.tabCount}タブ` : 'グループ'}を即番組化`;
+        ? `全${allTabsCount}タブで即番組化`
+        : `${selectedGroup ? `${selectedGroup.tabCount}タブ` : 'グループ'}で即番組化`;
 
   const tabScopeMeta =
     tabScope === 'active'
       ? '現在の1タブ'
       : tabScope === 'all'
-        ? `現在のウィンドウ全 ${allTabsCount} タブ`
+        ? `全 ${allTabsCount} タブ`
         : selectedGroup
-          ? `グループ内 ${selectedGroup.tabCount} タブ`
+          ? `${selectedGroup.tabCount} タブ`
           : 'タブグループ';
 
   return (
-    <section className="step-section" aria-label="STEP 2 巡回ソース">
-      {/* [1] Step Header */}
-      <div className="step-header">
-        <div>
-          <div className="step-kicker">STEP 2 / SOURCES &amp; PATROL</div>
-          <h2 className="step-title">巡回ソース管理と収集実行</h2>
-        </div>
-        <span className={`mono-pill ${enabledSourceCount === 0 ? 'is-warn' : ''}`}>
-          {enabledSourceCount}/{totalSourceCount} ON
-        </span>
-      </div>
-
-      {/* [2] Primary Action Card */}
+    <section className="step-section" aria-label="巡回ソース管理">
+      {/* Primary Patrol Actions */}
       <div className="n-primary-card">
         <div className="card-head-row">
-          <strong>📡 有効なソースを巡回してキューへ</strong>
-          {totalActiveRadar > 0 && (
-            <span className="pill-badge is-sage">動きあり {totalActiveRadar}</span>
-          )}
+          <strong>有効なソースを巡回</strong>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            {totalActiveRadar > 0 && (
+              <span className="pill-badge is-sage">動きあり {totalActiveRadar}</span>
+            )}
+            <span className={`mono-pill ${enabledSourceCount === 0 ? 'is-warn' : ''}`}>
+              {enabledSourceCount}/{totalSourceCount} ON
+            </span>
+          </div>
         </div>
-        <p className="field-hint" style={{ marginTop: 4 }}>
-          {enabledSourceCount === 0 ? (
-            <>
-              巡回対象が <strong>0件</strong> です。下の一覧からソースを1つ以上ONにするか、下のタブ取り込みを使ってください。
-            </>
-          ) : (
-            <>
-              有効なソースから最新情報だけを集め、自動で <strong>STEP 3 キュー</strong> に追加します。
-            </>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 10 }}>
+          {onPatrolAndPlay && (
+            <button
+              type="button"
+              className="btn-primary"
+              style={{ width: '100%' }}
+              disabled={isJobRunning || enabledSourceCount === 0}
+              onClick={onPatrolAndPlay}
+            >
+              {enabledSourceCount === 0
+                ? '巡回ソースを1つ以上ONにしてください'
+                : `選択中の ${enabledSourceCount} ソースを巡回して再生`}
+            </button>
           )}
-        </p>
-        <button
-          id="btn-patrol-to-queue"
-          type="button"
-          className="btn-primary"
-          style={{ width: '100%', marginTop: 8 }}
-          disabled={isJobRunning || enabledSourceCount === 0}
-          onClick={() => {
-            void send({ type: 'PATROL_SOURCES' }, '巡回を開始しました。集まった素材はキューに入ります');
-          }}
-        >
-          {enabledSourceCount === 0
-            ? '巡回ソースを1つ以上ONにしてください'
-            : `▶ 選択中の ${enabledSourceCount} ソースを巡回してキューへ送る`}
-        </button>
-
-        <div className="card-divider" />
-
-        {/* Unified Tab Capture Block (Active Tab / All Tabs / Tab Group) */}
-        <div className="tab-scope-header">
-          <span className="tab-scope-title">🌐 ブラウザのタブから直接取り込む</span>
-          <span className="tab-scope-meta">{tabScopeMeta}</span>
+          <button
+            id="btn-patrol-to-queue"
+            type="button"
+            className="btn-secondary"
+            style={{ width: '100%' }}
+            disabled={isJobRunning || enabledSourceCount === 0}
+            onClick={() => {
+              void send({ type: 'PATROL_SOURCES' }, '巡回を開始しました。素材はキューに入ります');
+            }}
+          >
+            キューに収集するだけ（素材を選んでから作成）
+          </button>
         </div>
+      </div>
+
+      {/* Collapsible Browser Tab Capture */}
+      <details className="tab-capture-details">
+        <summary>
+          <span>開いているタブから取り込む</span>
+          <span className="mono-pill">{tabScopeMeta}</span>
+        </summary>
 
         <div
           className={`tab-scope-seg ${tabGroups.length === 0 ? 'is-2col' : ''}`}
@@ -1047,7 +1046,7 @@ export function PatrolPanel({
               className={`tab-scope-btn ${tabScope === 'group' ? 'is-active' : ''}`}
               onClick={() => setTabScope('group')}
             >
-              📁 グループ
+              グループ
             </button>
           )}
         </div>
@@ -1062,7 +1061,7 @@ export function PatrolPanel({
             >
               {tabGroups.map((g) => (
                 <option key={g.id} value={g.id}>
-                  📁 {g.title} ({g.tabCount}タブ)
+                  {g.title} ({g.tabCount}タブ)
                 </option>
               ))}
             </select>
@@ -1077,10 +1076,10 @@ export function PatrolPanel({
           </div>
         )}
 
-        <div className="action-row-2" style={{ marginTop: 6 }}>
+        <div className="action-row-2" style={{ marginTop: 8 }}>
           <button
             type="button"
-            className="btn-secondary"
+            className="btn-secondary btn-compact"
             disabled={isTabActionDisabled}
             onClick={() => void handleTabCapture(false)}
           >
@@ -1088,23 +1087,28 @@ export function PatrolPanel({
           </button>
           <button
             type="button"
-            className="btn-secondary is-instant"
+            className="btn-primary btn-compact"
             disabled={isTabActionDisabled}
             onClick={() => void handleTabCapture(true)}
           >
             {tabInstantLabel}
           </button>
         </div>
-      </div>
+      </details>
 
-      {/* Queue Status & Clear Strip (visible when queue already has items) */}
+      {/* Queue Status Strip (only when queue has items) */}
       {queueCount > 0 && (
-        <div className="queue-strip">
-          <span className="queue-strip-label">
-            現在のキュー: <strong>{queueCount}件</strong>
-          </span>
+        <div className="n-card flow-bar">
+          <button
+            type="button"
+            className="btn-ghost"
+            style={{ padding: 0, color: 'var(--text-primary)' }}
+            onClick={onGoToQueue}
+          >
+            未読キュー: <strong className="mono-inline">{queueCount}件</strong> を確認 →
+          </button>
           {confirmClearQueue ? (
-            <div className="queue-strip-actions">
+            <div style={{ display: 'flex', gap: 4 }}>
               <button
                 type="button"
                 className="btn-danger-solid btn-compact"
@@ -1114,7 +1118,7 @@ export function PatrolPanel({
                   void onClearQueue();
                 }}
               >
-                本当に空にする
+                空にする
               </button>
               <button
                 type="button"
@@ -1127,19 +1131,19 @@ export function PatrolPanel({
           ) : (
             <button
               type="button"
-              className="btn-danger-ghost btn-compact"
+              className="btn-ghost"
               disabled={isJobRunning}
               onClick={() => setConfirmClearQueue(true)}
             >
-              🗑 キューを空にする
+              クリア
             </button>
           )}
         </div>
       )}
 
-      {/* [3] Flat Unified Source List */}
+      {/* Flat Unified Source List */}
       <div className="list-head-row">
-        <span className="section-label">巡回ソース一覧（フラット管理）</span>
+        <span className="section-label">巡回ソース</span>
         <div style={{ display: 'flex', gap: 6 }}>
           <button type="button" className="btn-ghost" onClick={() => void handlePrefillActiveTab()}>
             ＋ 今のタブを登録
@@ -1149,7 +1153,7 @@ export function PatrolPanel({
             className="btn-ghost is-accent"
             onClick={() => setIsAddOpen((v) => !v)}
           >
-            {isAddOpen ? '閉じる' : '＋ ソース追加'}
+            {isAddOpen ? '閉じる' : '＋ 追加'}
           </button>
         </div>
       </div>
@@ -1209,10 +1213,10 @@ export function PatrolPanel({
                   <button
                     key={id}
                     type="button"
-                    className="btn-secondary"
+                    className="btn-secondary btn-compact"
                     onClick={() => void handleRestoreBuiltin(id)}
                   >
-                    ＋ {SOURCE_ICONS[id]} {SOURCE_META[id].shortLabel}
+                    ＋ {SOURCE_META[id].shortLabel}
                   </button>
                 ))}
               </div>
@@ -1227,17 +1231,17 @@ export function PatrolPanel({
           const enabled = Boolean(settings.enabledSources[srcId]);
           const badge =
             srcId === 'youtube' && ytActiveCount > 0
-              ? `動きあり ${ytActiveCount}`
+              ? `新着 ${ytActiveCount}`
               : srcId === 'x' && xActiveCount > 0
-                ? `動きあり ${xActiveCount}`
+                ? `新着 ${xActiveCount}`
                 : null;
           const summary =
             srcId === 'youtube'
               ? ytTargets.length > 0
-                ? `登録 ${ytTargets.length}ch ・ 動きあり ${ytActiveCount} ・ 動画要約対応`
+                ? `登録 ${ytTargets.length}ch · 新着 ${ytActiveCount}`
                 : meta.description
               : srcId === 'x' && xTargets.length > 0
-                ? `タイムライン ＋ 監視 ${xTargets.filter((t) => t.enabled).length}人（動きあり ${xActiveCount}）`
+                ? `タイムライン ＋ 監視 ${xTargets.filter((t) => t.enabled).length}人`
                 : meta.description;
 
           return (
@@ -1254,7 +1258,6 @@ export function PatrolPanel({
                 onClick={() => setDetail({ kind: 'builtin', sourceId: srcId })}
               >
                 <div className="flat-source-top">
-                  <span>{SOURCE_ICONS[srcId]}</span>
                   <span className="flat-source-name">{meta.shortLabel}</span>
                   {(() => {
                     const d = resolvePatrolDepth(srcId, settings.sourcePatrolDepth?.[srcId]);
@@ -1273,19 +1276,11 @@ export function PatrolPanel({
               </button>
               <button
                 type="button"
-                className="btn-secondary btn-compact"
+                className="btn-ghost"
                 onClick={() => setDetail({ kind: 'builtin', sourceId: srcId })}
+                aria-label={`${meta.shortLabel} の詳細`}
               >
                 詳細 ›
-              </button>
-              <button
-                type="button"
-                className="btn-ghost"
-                onClick={() => void handleRemoveBuiltin(srcId)}
-                title="一覧から削除"
-                aria-label={`${meta.shortLabel} を削除`}
-              >
-                ✕
               </button>
             </div>
           );
@@ -1308,7 +1303,6 @@ export function PatrolPanel({
               }}
             >
               <div className="flat-source-top">
-                <span>🔗</span>
                 <span className="flat-source-name">{site.name}</span>
                 {(() => {
                   const d = resolvePatrolDepth('generic', site.patrolDepth, site.scrollSteps);
@@ -1329,22 +1323,14 @@ export function PatrolPanel({
             </button>
             <button
               type="button"
-              className="btn-secondary btn-compact"
+              className="btn-ghost"
               onClick={() => {
                 setEditingCustom({ ...site });
                 setDetail({ kind: 'custom', siteId: site.id });
               }}
+              aria-label={`${site.name} の詳細`}
             >
               詳細 ›
-            </button>
-            <button
-              type="button"
-              className="btn-ghost"
-              onClick={() => void handleDeleteCustom(site.id)}
-              title="削除"
-              aria-label={`${site.name} を削除`}
-            >
-              ✕
             </button>
           </div>
         ))}

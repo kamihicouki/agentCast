@@ -5,8 +5,11 @@ import {
   getUnreadQueue,
 } from '../../storage/db';
 import {
+  APP_THEMES,
   DEFAULT_SETTINGS,
   INITIAL_PLAYBACK_STATE,
+  PATROL_SOURCE_IDS,
+  type AppThemeId,
   type BuildMeta,
   type ExtensionSettings,
   type FeedItem,
@@ -23,7 +26,11 @@ import {
   hasDataConsent,
   PRIVACY_POLICY_URL,
 } from '../../shared/data-consent';
-import { ensureHostPermissionsForUrls, patrolPermissionUrls } from '../../shared/permissions';
+import {
+  ensureHostPermissionsForUrls,
+  patrolPermissionUrls,
+  requestPatrolPermissions,
+} from '../../shared/permissions';
 import {
   copyEpisodeMarkdown,
   downloadEpisodeAudio,
@@ -39,7 +46,8 @@ import { PatrolPanel } from './PatrolPanel';
 import { QueuePanel } from './QueuePanel';
 import { PlayerPanel, type ResynthesizeRequest } from './PlayerPanel';
 
-type ActiveTab = 'settings' | 'patrol' | 'queue' | 'player';
+type ActiveTab = 'listen' | 'sources' | 'settings';
+type SourcesSubTab = 'patrol' | 'queue';
 
 const SPEED_STEPS = [1.0, 1.25, 1.5, 1.75, 2.0];
 
@@ -155,8 +163,8 @@ export function App() {
 }
 
 function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<void> }) {
-  const [tab, setTab] = useState<ActiveTab>('patrol');
-  const [didInitTab, setDidInitTab] = useState(false);
+  const [tab, setTab] = useState<ActiveTab>('listen');
+  const [sourcesSubTab, setSourcesSubTab] = useState<SourcesSubTab>('patrol');
   const [episodes, setEpisodes] = useState<PodcastEpisode[]>([]);
   const [selectedEpisodeId, setSelectedEpisodeId] = useState<string | null>(null);
   const [queue, setQueue] = useState<FeedItem[]>([]);
@@ -191,6 +199,17 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
   const [publishStatus, setPublishStatus] = useState<PublishPipelineStatus | null>(null);
 
   const activeTurnRef = useRef<HTMLDivElement | null>(null);
+
+  // Apply active theme to root document and cache in localStorage
+  useEffect(() => {
+    const activeTheme: AppThemeId = settings.theme || 'braun';
+    document.documentElement.dataset.theme = activeTheme;
+    try {
+      localStorage.setItem('agentcast_theme', activeTheme);
+    } catch {
+      // ignore storage errors
+    }
+  }, [settings.theme]);
 
   const showToast = useCallback((msg: string) => {
     setToastMessage(msg);
@@ -229,21 +248,7 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
       if (prev && eps.some((e) => e.id === prev)) return prev;
       return eps[0]?.id || null;
     });
-
-    if (!didInitTab) {
-      setDidInitTab(true);
-      const aiNeedsSetup =
-        (savedSettings.aiMode === 'gemini_api' && !savedSettings.geminiApiKey.trim()) ||
-        (savedSettings.aiMode === 'openai_api' && !savedSettings.openaiApiKey.trim());
-      if (aiNeedsSetup) {
-        setTab('settings');
-      } else if (eps.length > 0) {
-        setTab('player');
-      } else {
-        setTab('patrol');
-      }
-    }
-  }, [didInitTab]);
+  }, []);
 
   useEffect(() => {
     void refreshData();
@@ -434,7 +439,7 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
     } satisfies RuntimeRequest);
     if (res?.ok) {
       await refreshData();
-      setTab('player');
+      setTab('listen');
       showToast('デモ番組を再生します');
     }
   };
@@ -768,6 +773,59 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
     }
   };
 
+  const enabledSourceCount = useMemo(() => {
+    const removed = new Set(settings.removedBuiltinSources || []);
+    const builtinEnabled = PATROL_SOURCE_IDS.filter(
+      (id) => !removed.has(id) && settings.enabledSources[id]
+    ).length;
+    const customEnabled = (settings.customSites || []).filter((s) => s.enabled).length;
+    return builtinEnabled + customEnabled;
+  }, [settings.enabledSources, settings.removedBuiltinSources, settings.customSites]);
+
+  const isEngineReady = useMemo(() => {
+    const aiReady =
+      settings.aiMode === 'web_chatgpt' ||
+      settings.aiMode === 'web_gemini' ||
+      (settings.aiMode === 'gemini_api' && Boolean(settings.geminiApiKey.trim())) ||
+      (settings.aiMode === 'openai_api' && Boolean(settings.openaiApiKey.trim()));
+    const ttsReady =
+      settings.ttsMode === 'macos_speech' ||
+      (settings.ttsMode === 'gemini_tts' && Boolean(settings.geminiApiKey.trim())) ||
+      (settings.ttsMode === 'openai_tts' && Boolean(settings.openaiApiKey.trim()));
+    return aiReady && ttsReady;
+  }, [settings.aiMode, settings.ttsMode, settings.geminiApiKey, settings.openaiApiKey]);
+
+  const handlePatrolAndPlay = async () => {
+    setErrorBanner('');
+    if (enabledSourceCount === 0) {
+      setTab('sources');
+      setSourcesSubTab('patrol');
+      setErrorBanner('巡回ソースを1つ以上有効にしてください。');
+      return;
+    }
+    if (!isEngineReady) {
+      setTab('settings');
+      setErrorBanner('AI / 音声エンジンの設定を完了してください。');
+      return;
+    }
+    const msg: RuntimeRequest = { type: 'PATROL_AND_GENERATE', autoPlay: true };
+    try {
+      if (!(await requestPatrolPermissions(msg, settings))) {
+        setErrorBanner('対象サイトへのアクセスが許可されませんでした。');
+        return;
+      }
+      const res = await chrome.runtime.sendMessage(msg);
+      if (!res?.ok) {
+        setErrorBanner(res?.error || '番組作成の開始に失敗しました。');
+        return;
+      }
+      setTab('listen');
+      showToast('巡回から番組作成・再生を開始しました');
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : String(err));
+    }
+  };
+
   const handleRemoveQueueItem = async (id: string) => {
     await db.feedItems.delete(id);
     setQueue((prev) => prev.filter((item) => item.id !== id));
@@ -782,15 +840,17 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
 
   const miniEpisode =
     (playback.episodeId && episodes.find((e) => e.id === playback.episodeId)) || displayedEpisode;
+  const activeTheme: AppThemeId = settings.theme || 'braun';
 
   return (
     <div className="studio-shell">
       <header className="studio-header">
         <div className="brand-row">
           <h1 className="brand-title">
-            <span className="brand-emblem" aria-hidden="true">
-              🎧
-            </span>
+            <span
+              className={`brand-mark ${playback.isPlaying ? 'is-live' : ''}`}
+              aria-hidden="true"
+            />
             agentCast
             <span className="version-pill">
               v{typeof __AGENTCAST_VERSION__ !== 'undefined' ? __AGENTCAST_VERSION__ : 'dev'}
@@ -820,155 +880,113 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
                 更新反映
               </button>
             )}
+            <div className="theme-dots" role="radiogroup" aria-label="テーマ切替">
+              {APP_THEMES.map((t) => {
+                const isActive = activeTheme === t.id;
+                return (
+                  <button
+                    key={t.id}
+                    type="button"
+                    role="radio"
+                    aria-checked={isActive}
+                    className={`theme-dot-btn ${isActive ? 'is-active' : ''}`}
+                    style={{ background: t.swatchBg }}
+                    title={`テーマ: ${t.name}（${t.labelJa}）`}
+                    aria-label={`テーマを ${t.name} に変更`}
+                    onClick={() => void handlePatchSettings({ theme: t.id })}
+                  >
+                    <span className="theme-dot-accent" style={{ background: t.swatchAccent }} />
+                  </button>
+                );
+              })}
+            </div>
           </div>
         </div>
 
-        {/* Unified 4-Step Workflow Nav (Left -> Right) */}
-        <nav className="nav-tabs" aria-label="4ステップナビゲーション">
+        {/* Calm 3-Tab Editorial Navigation */}
+        <nav className="nav-tabs" aria-label="メインナビゲーション">
+          <button
+            id="tab-listen"
+            type="button"
+            className={`nav-tab ${tab === 'listen' ? 'is-active' : ''}`}
+            onClick={() => setTab('listen')}
+          >
+            <span>聴く</span>
+            {episodes.length > 0 && <span className="nav-count">{episodes.length}</span>}
+          </button>
+          <button
+            id="tab-sources"
+            type="button"
+            className={`nav-tab ${tab === 'sources' ? 'is-active' : ''}`}
+            onClick={() => setTab('sources')}
+          >
+            <span>巡回</span>
+            {queue.length > 0 && <span className="nav-count">{queue.length}</span>}
+          </button>
           <button
             id="tab-settings"
             type="button"
             className={`nav-tab ${tab === 'settings' ? 'is-active' : ''}`}
             onClick={() => setTab('settings')}
           >
-            <span className="nav-step">STEP 1</span>
             <span>設定</span>
           </button>
-          <button
-            id="tab-patrol"
-            type="button"
-            className={`nav-tab ${tab === 'patrol' ? 'is-active' : ''}`}
-            onClick={() => setTab('patrol')}
-          >
-            <span className="nav-step">STEP 2</span>
-            <span>巡回</span>
-          </button>
-          <button
-            id="tab-queue"
-            type="button"
-            className={`nav-tab ${tab === 'queue' ? 'is-active' : ''}`}
-            onClick={() => setTab('queue')}
-          >
-            <span className="nav-step">STEP 3</span>
-            <span>キュー ({queue.length})</span>
-          </button>
-          <button
-            id="tab-player"
-            type="button"
-            className={`nav-tab ${tab === 'player' ? 'is-active' : ''}`}
-            onClick={() => setTab('player')}
-          >
-            <span className="nav-step">STEP 4</span>
-            <span>再生</span>
-          </button>
         </nav>
-
-        {(busyMessage || toastMessage || displayedEpisode?.statusDetail) && (
-          <div className="status-banner" role="status">
-            <span>{busyMessage || toastMessage || displayedEpisode?.statusDetail}</span>
-          </div>
-        )}
-
-        {resynthMessage && resynthMessage !== displayedEpisode?.statusDetail && (
-          <div className="status-banner" role="status">
-            <span>{resynthMessage}</span>
-          </div>
-        )}
-
-        {exportMessage && (
-          <div className="status-banner" role="status">
-            <span>{exportMessage}</span>
-          </div>
-        )}
-
-        {publishStatus?.running && (
-          <div className="status-banner" role="status">
-            <span>{publishStatus.message || '自動投稿を実行中...'}</span>
-            <button
-              type="button"
-              className="btn-ghost"
-              onClick={() => void handleCancelPublish()}
-              aria-label="自動投稿を中止"
-            >
-              中止
-            </button>
-          </div>
-        )}
-
-        {(errorBanner || displayedEpisode?.errorMessage) && (
-          <div className="status-banner is-error" role="alert">
-            <span>{errorBanner || displayedEpisode?.errorMessage}</span>
-            <button
-              type="button"
-              className="btn-ghost"
-              onClick={() => setErrorBanner('')}
-              aria-label="エラー表示を閉じる"
-            >
-              ✕
-            </button>
-          </div>
-        )}
       </header>
 
+      {(toastMessage ||
+        resynthMessage ||
+        exportMessage ||
+        publishStatus?.running ||
+        errorBanner ||
+        displayedEpisode?.errorMessage) && (
+        <div className="banner-stack">
+          {toastMessage && (
+            <div className="status-banner" role="status">
+              <span>{toastMessage}</span>
+            </div>
+          )}
+          {resynthMessage && resynthMessage !== displayedEpisode?.statusDetail && (
+            <div className="status-banner" role="status">
+              <span>{resynthMessage}</span>
+            </div>
+          )}
+          {exportMessage && (
+            <div className="status-banner" role="status">
+              <span>{exportMessage}</span>
+            </div>
+          )}
+          {publishStatus?.running && (
+            <div className="status-banner" role="status">
+              <span>{publishStatus.message || '自動投稿を実行中...'}</span>
+              <button
+                type="button"
+                className="btn-ghost"
+                onClick={() => void handleCancelPublish()}
+                aria-label="自動投稿を中止"
+              >
+                中止
+              </button>
+            </div>
+          )}
+          {(errorBanner || displayedEpisode?.errorMessage) && (
+            <div className="status-banner is-error" role="alert">
+              <span>{errorBanner || displayedEpisode?.errorMessage}</span>
+              <button
+                type="button"
+                className="btn-ghost"
+                onClick={() => setErrorBanner('')}
+                aria-label="エラー表示を閉じる"
+              >
+                ✕
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
       <main className="studio-main">
-        {tab === 'settings' && (
-          <SettingsPanel
-            settings={settings}
-            currentBuild={currentBuild}
-            pendingBuild={pendingBuild}
-            isJobRunning={isJobRunning}
-            isVerifyingKey={isVerifyingKey}
-            keyVerifyStatus={keyVerifyStatus}
-            isVerifyingOpenAiKey={isVerifyingOpenAiKey}
-            openAiKeyVerifyStatus={openAiKeyVerifyStatus}
-            isOrganizingGeminiNotebook={isOrganizingGeminiNotebook}
-            geminiNotebookStatus={geminiNotebookStatus}
-            onPatchSettings={handlePatchSettings}
-            onStartGeminiKeySetup={handleStartGeminiKeySetup}
-            onVerifyGeminiKey={handleVerifyGeminiKey}
-            onStartOpenAiKeySetup={handleStartOpenAiKeySetup}
-            onVerifyOpenAiKey={handleVerifyOpenAiKey}
-            onOrganizeGeminiNotebook={handleOrganizeGeminiNotebook}
-            onCreateDemo={handleCreateDemo}
-            onGoToPatrol={() => setTab('patrol')}
-            onRevokeConsent={onRevokeConsent ? () => {
-              void onRevokeConsent().catch(() => setErrorBanner('同意を取り消せませんでした。'));
-            } : undefined}
-          />
-        )}
-
-        {tab === 'patrol' && (
-          <PatrolPanel
-            settings={settings}
-            isJobRunning={isJobRunning}
-            queueCount={queue.length}
-            tabGroups={tabGroups}
-            selectedGroupId={selectedGroupId}
-            onSelectGroupId={(id) => setSelectedGroupId(id)}
-            onRefreshTabGroups={refreshTabGroups}
-            onClearQueue={handleClearQueue}
-            onPatchSettings={handlePatchSettings}
-            onGoToQueue={() => setTab('queue')}
-            showToast={showToast}
-            setErrorBanner={setErrorBanner}
-          />
-        )}
-
-        {tab === 'queue' && (
-          <QueuePanel
-            queue={queue}
-            settings={settings}
-            isJobRunning={isJobRunning}
-            onRemoveItem={handleRemoveQueueItem}
-            onClearQueue={handleClearQueue}
-            onGoToPatrol={() => setTab('patrol')}
-            onGoToPlayer={() => setTab('player')}
-            showToast={showToast}
-            setErrorBanner={setErrorBanner}
-          />
-        )}
-
-        {tab === 'player' && (
+        {tab === 'listen' && (
           <PlayerPanel
             episodes={episodes}
             displayedEpisode={displayedEpisode}
@@ -1005,28 +1023,127 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
             onPublishBoth={() => void handlePublishBoth()}
             onDownloadMp4={() => void handleDownloadMp4()}
             onCreateDemo={() => void handleCreateDemo()}
-            onGoToPatrol={() => setTab('patrol')}
+            onGoToPatrol={() => {
+              setTab('sources');
+              setSourcesSubTab('patrol');
+            }}
+            enabledSourceCount={enabledSourceCount}
+            isEngineReady={isEngineReady}
+            busyMessage={busyMessage}
+            onPatrolAndPlay={() => void handlePatrolAndPlay()}
+            onGoToSettings={() => setTab('settings')}
+          />
+        )}
+
+        {tab === 'sources' && (
+          <div className="step-section">
+            <div className="segmented segmented-2" role="tablist" aria-label="巡回とキュー切替">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={sourcesSubTab === 'patrol'}
+                className={`segment ${sourcesSubTab === 'patrol' ? 'is-active' : ''}`}
+                onClick={() => setSourcesSubTab('patrol')}
+              >
+                巡回ソース ({enabledSourceCount})
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={sourcesSubTab === 'queue'}
+                className={`segment ${sourcesSubTab === 'queue' ? 'is-active' : ''}`}
+                onClick={() => setSourcesSubTab('queue')}
+              >
+                素材キュー ({queue.length})
+              </button>
+            </div>
+
+            {sourcesSubTab === 'patrol' ? (
+              <PatrolPanel
+                settings={settings}
+                isJobRunning={isJobRunning}
+                queueCount={queue.length}
+                tabGroups={tabGroups}
+                selectedGroupId={selectedGroupId}
+                onSelectGroupId={(id) => setSelectedGroupId(id)}
+                onRefreshTabGroups={refreshTabGroups}
+                onClearQueue={handleClearQueue}
+                onPatchSettings={handlePatchSettings}
+                onGoToQueue={() => setSourcesSubTab('queue')}
+                onPatrolAndPlay={() => void handlePatrolAndPlay()}
+                showToast={showToast}
+                setErrorBanner={setErrorBanner}
+              />
+            ) : (
+              <QueuePanel
+                queue={queue}
+                settings={settings}
+                isJobRunning={isJobRunning}
+                onRemoveItem={handleRemoveQueueItem}
+                onClearQueue={handleClearQueue}
+                onGoToPatrol={() => setSourcesSubTab('patrol')}
+                onGoToPlayer={() => setTab('listen')}
+                showToast={showToast}
+                setErrorBanner={setErrorBanner}
+              />
+            )}
+          </div>
+        )}
+
+        {tab === 'settings' && (
+          <SettingsPanel
+            settings={settings}
+            currentBuild={currentBuild}
+            pendingBuild={pendingBuild}
+            isJobRunning={isJobRunning}
+            isVerifyingKey={isVerifyingKey}
+            keyVerifyStatus={keyVerifyStatus}
+            isVerifyingOpenAiKey={isVerifyingOpenAiKey}
+            openAiKeyVerifyStatus={openAiKeyVerifyStatus}
+            isOrganizingGeminiNotebook={isOrganizingGeminiNotebook}
+            geminiNotebookStatus={geminiNotebookStatus}
+            onPatchSettings={handlePatchSettings}
+            onStartGeminiKeySetup={handleStartGeminiKeySetup}
+            onVerifyGeminiKey={handleVerifyGeminiKey}
+            onStartOpenAiKeySetup={handleStartOpenAiKeySetup}
+            onVerifyOpenAiKey={handleVerifyOpenAiKey}
+            onOrganizeGeminiNotebook={handleOrganizeGeminiNotebook}
+            onCreateDemo={handleCreateDemo}
+            onGoToPatrol={() => {
+              setTab('sources');
+              setSourcesSubTab('patrol');
+            }}
+            onRevokeConsent={
+              onRevokeConsent
+                ? () => {
+                    void onRevokeConsent().catch(() =>
+                      setErrorBanner('同意を取り消せませんでした。')
+                    );
+                  }
+                : undefined
+            }
           />
         )}
       </main>
 
-      {/* Persistent Napster Mini-Player on Steps 1-3 */}
-      {tab !== 'player' && miniEpisode && (
+      {/* Persistent Minimal Mini-Player when on Sources / Settings */}
+      {tab !== 'listen' && miniEpisode && (
         <footer className="mini-player" aria-label="ミニプレイヤー">
           <button
             type="button"
             className="mini-player-info"
-            onClick={() => setTab('player')}
+            onClick={() => setTab('listen')}
           >
-            <span className="mini-cover" aria-hidden="true">
-              🎧
-            </span>
+            <span
+              className={`deck-led ${playback.isPlaying ? 'is-live' : ''}`}
+              aria-hidden="true"
+            />
             <span className="mini-texts">
               <span className="mini-title">{miniEpisode.title}</span>
               <span className="mini-status">
                 {playback.isPlaying
-                  ? `再生中 ・ ${formatSec(playback.currentTimeSec)} / ${formatSec(playback.durationSec || miniEpisode.totalDurationSec)}`
-                  : `一時停止 ・ ${formatSec(miniEpisode.totalDurationSec)}`}
+                  ? `${formatSec(playback.currentTimeSec)} / ${formatSec(playback.durationSec || miniEpisode.totalDurationSec)}`
+                  : `一時停止 · ${formatSec(miniEpisode.totalDurationSec)}`}
               </span>
             </span>
           </button>

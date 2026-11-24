@@ -950,7 +950,7 @@ async function loadRecentTopicDigests(limit = 8, maxDays = 7): Promise<RecentTop
 
 async function generateEpisodeFromItems(
   explicitItems?: FeedItem[],
-  overrides?: { durationMin?: number; durationMode?: 'fixed' | 'auto' }
+  overrides?: { durationMin?: number; durationMode?: 'fixed' | 'auto'; forceAutoPlay?: boolean }
 ): Promise<PodcastEpisode> {
   await requireDataConsent();
   const baseSettings = await getSettings();
@@ -1108,7 +1108,8 @@ async function generateEpisodeFromItems(
           await db.episodes.put({ ...episodeWithScript });
           broadcastEvent({ type: 'EPISODES_UPDATED', episodeId });
 
-          if (i === 0 && !autoPlayTriggered && !latestPlaybackState.isPlaying) {
+          const shouldAutoPlay = Boolean(overrides?.forceAutoPlay || !latestPlaybackState.isPlaying);
+          if (i === 0 && !autoPlayTriggered && shouldAutoPlay) {
             autoPlayTriggered = true;
             await playEpisodeInOffscreen(episodeWithScript, 0, settings.playbackRate);
           }
@@ -1121,7 +1122,7 @@ async function generateEpisodeFromItems(
       episodeWithScript.statusDetail = undefined;
       episodeWithScript.updatedAt = new Date().toISOString();
       await db.episodes.put({ ...episodeWithScript });
-    } else if (!latestPlaybackState.isPlaying) {
+    } else if (overrides?.forceAutoPlay || !latestPlaybackState.isPlaying) {
       await playEpisodeInOffscreen(episodeWithScript, 0, settings.playbackRate);
     }
 
@@ -1311,7 +1312,10 @@ async function resynthesizeEpisodeAudio(options: {
   return { episode: workingEpisode, warnings };
 }
 
-async function patrolAndGenerateEpisode(sources?: SourceId[]): Promise<{
+async function patrolAndGenerateEpisode(
+  sources?: SourceId[],
+  opts?: { forceAutoPlay?: boolean }
+): Promise<{
   warnings: string[];
 }> {
   const patrolRes = await patrolSources(sources);
@@ -1326,7 +1330,7 @@ async function patrolAndGenerateEpisode(sources?: SourceId[]): Promise<{
       warnings.push(`動向レーダー: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
-  await generateEpisodeFromItems();
+  await generateEpisodeFromItems(undefined, { forceAutoPlay: opts?.forceAutoPlay });
   return { warnings };
 }
 
@@ -1666,8 +1670,10 @@ function handleRequest(
         return false;
       }
       sendResponse({ ok: true, started: true });
-      void runBackgroundJob('フォロー中サイトを巡回して番組を編成中...', async () => {
-        return patrolAndGenerateEpisode(message.sources);
+      void runBackgroundJob('ソースを巡回して番組を作成しています…', async () => {
+        return patrolAndGenerateEpisode(message.sources, {
+          forceAutoPlay: message.autoPlay !== false,
+        });
       });
       return false;
 
