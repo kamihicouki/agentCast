@@ -103,7 +103,8 @@ export function buildYouTubeMetadata(
 
 export function buildXPostPayload(
   episode: PodcastEpisode,
-  publish: PublishSettings
+  publish: PublishSettings,
+  options?: { youtubeUrl?: string }
 ): { postText: string; threadReplyText: string } {
   const topicChapters = episode.chapters.filter(
     (c) => !/^(オープニング|導入|エンディング)[:：]?$/i.test(c.title.trim())
@@ -114,19 +115,34 @@ export function buildXPostPayload(
     .join('\n');
 
   const tags = publish.xHashtags?.trim() || '#agentCast';
-  const rawPost = [
+  const youtubeUrl =
+    publish.xIncludeYouTubeUrl !== false
+      ? (options?.youtubeUrl || episode.publishedYouTubeUrl || '').trim()
+      : '';
+
+  // X counts any URL as 23 weighted chars (~12 Japanese full-width chars via t.co).
+  // Reserve space for the YouTube URL & tags so the URL is never truncated.
+  const urlLine = youtubeUrl ? `📺 ${youtubeUrl}` : '';
+  const bodyMaxChars = youtubeUrl ? 112 : 138;
+
+  const rawBody = [
     `🎙 ${episode.title}`,
-    episode.subtitle ? episode.subtitle.slice(0, 70) : '',
+    episode.subtitle ? episode.subtitle.slice(0, 64) : '',
     highlights,
     tags,
   ]
     .filter(Boolean)
     .join('\n\n');
 
-  // Keep comfortably within standard X post length (~135 Japanese chars)
-  const postText = rawPost.length > 138 ? `${rawPost.slice(0, 136)}…` : rawPost;
+  const trimmedBody =
+    rawBody.length > bodyMaxChars ? `${rawBody.slice(0, bodyMaxChars - 1)}…` : rawBody;
+
+  const postText = urlLine ? `${trimmedBody}\n\n${urlLine}` : trimmedBody;
 
   const replyLines: string[] = ['【今回の参照リンク＆チャプター】'];
+  if (youtubeUrl) {
+    replyLines.push(`📺 YouTube版\n${youtubeUrl}`);
+  }
   const seen = new Set<string>();
   for (const ch of episode.chapters) {
     for (const src of ch.sourceItems) {

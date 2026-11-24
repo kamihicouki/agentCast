@@ -71,6 +71,7 @@ export type RuntimeRequest =
   | { type: 'OFFSCREEN_SET_RATE'; rate: number }
   | { type: 'OFFSCREEN_GET_STATE' }
   | { type: 'OFFSCREEN_STATE_PUSH'; state: PlaybackState }
+  | { type: 'OFFSCREEN_RENDER_MP4'; episodeId: string; jobId: string }
   | { type: 'TRIGGER_DEV_RELOAD_NOW' }
   | { type: 'GET_DEV_BUILD_STATUS' }
   | { type: 'UPDATE_SETTINGS'; settings: Partial<ExtensionSettings> }
@@ -81,8 +82,24 @@ export type RuntimeRequest =
   | { type: 'OPENAI_KEY_CAPTURED'; apiKey: string; closeSetupTab?: boolean }
   | { type: 'VERIFY_OPENAI_KEY'; apiKey?: string }
   | { type: 'START_PUBLISH_JOB'; job: PendingPublishJob }
+  | {
+      type: 'AUTO_PUBLISH_EPISODE';
+      episodeId: string;
+      platforms: ('youtube' | 'x')[];
+      autoSubmit?: boolean;
+    }
+  | { type: 'CANCEL_PUBLISH_PIPELINE' }
+  | { type: 'GET_PUBLISH_STATUS' }
   | { type: 'GET_PENDING_PUBLISH_JOB' }
   | { type: 'GET_PENDING_PUBLISH_VIDEO_CHUNK'; jobId: string; offset: number; length: number }
+  | {
+      type: 'REPORT_PUBLISH_RESULT';
+      jobId: string;
+      platform: 'youtube' | 'x';
+      status: 'progress' | 'completed' | 'failed' | 'cancelled';
+      message?: string;
+      publishedUrl?: string;
+    }
   | { type: 'CLEAR_PENDING_PUBLISH_JOB' }
   | { type: 'RADAR_CHECK'; platforms?: ('youtube' | 'x')[] }
   | { type: 'RADAR_IMPORT_YOUTUBE_SUBS' }
@@ -105,6 +122,8 @@ export type RuntimeRequest =
 
 export interface PendingPublishJob {
   id: string;
+  episodeId?: string;
+  mediaJobId?: string;
   platform: 'youtube' | 'x';
   targetUrl: string;
   title: string;
@@ -114,12 +133,25 @@ export interface PendingPublishJob {
   visibility?: 'unlisted' | 'private' | 'public';
   channelName?: string;
   expectedXHandle?: string;
+  youtubeUrl?: string;
+  autoSubmit?: boolean;
   fileName?: string;
   mimeType?: string;
   hasVideo?: boolean;
   videoSizeBytes?: number;
   videoBase64?: string;
   createdAt: number;
+}
+
+export interface PublishPipelineStatus {
+  running: boolean;
+  episodeId: string | null;
+  currentPlatform: 'youtube' | 'x' | null;
+  remainingPlatforms: ('youtube' | 'x')[];
+  message: string;
+  error: string;
+  youtubeUrl?: string;
+  xUrl?: string;
 }
 
 export interface DevBuildStatus {

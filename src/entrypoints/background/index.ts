@@ -28,11 +28,17 @@ import type {
   CustomExtractRule,
   ExtractionResultPayload,
   PendingPublishJob,
+  PublishPipelineStatus,
   RuntimeRequest,
 } from '../../shared/messages';
 import { DATA_CONSENT_KEY, DATA_CONSENT_REQUIRED, hasDataConsent, requireDataConsent } from '../../shared/data-consent';
 import { canReadPage, matchesPassiveSite, toOriginPattern } from '../../shared/permissions';
-import { readBlobChunkAsBase64 } from '../../shared/publish-utils';
+import {
+  buildXPostPayload,
+  buildYouTubeMetadata,
+  buildYouTubeStudioUploadUrl,
+  readBlobChunkAsBase64,
+} from '../../shared/publish-utils';
 import { parseZennRssXml } from '../../extractors/zenn';
 import { parseGenericRssOrAtomXml } from '../../extractors/custom-site';
 import {
@@ -1125,6 +1131,9 @@ async function generateEpisodeFromItems(
     );
     broadcastEvent({ type: 'EPISODES_UPDATED', episodeId });
     broadcastEvent({ type: 'QUEUE_UPDATED' });
+    void triggerAutoPublishAfterGenerate(episodeId).catch((err) => {
+      console.warn('[agentCast] Auto-publish after generate failed:', err);
+    });
     return episodeWithScript;
   } catch (err) {
     // Delete empty placeholder so "番組台本を構成中..." zombies never pile up in the episode picker
@@ -1460,8 +1469,9 @@ const dataOperations = new Set<RuntimeRequest['type']>([
   'LIST_TAB_GROUPS', 'PATROL_TAB_GROUP', 'PATROL_ALL_TABS', 'PATROL_SOURCES', 'GENERATE_EPISODE_FROM_QUEUE',
   'RESYNTHESIZE_EPISODE_AUDIO', 'PATROL_AND_GENERATE', 'UPDATE_SETTINGS', 'PATROL_CUSTOM_SITE', 'START_GEMINI_KEY_SETUP',
   'GEMINI_KEY_CAPTURED', 'VERIFY_GEMINI_KEY', 'START_OPENAI_KEY_SETUP', 'OPENAI_KEY_CAPTURED',
-  'VERIFY_OPENAI_KEY', 'START_PUBLISH_JOB', 'GET_PENDING_PUBLISH_JOB',
-  'GET_PENDING_PUBLISH_VIDEO_CHUNK', 'CLEAR_PENDING_PUBLISH_JOB', 'RADAR_CHECK', 'RADAR_IMPORT_YOUTUBE_SUBS',
+  'VERIFY_OPENAI_KEY', 'START_PUBLISH_JOB', 'AUTO_PUBLISH_EPISODE', 'CANCEL_PUBLISH_PIPELINE',
+  'GET_PENDING_PUBLISH_JOB', 'GET_PENDING_PUBLISH_VIDEO_CHUNK', 'REPORT_PUBLISH_RESULT',
+  'CLEAR_PENDING_PUBLISH_JOB', 'RADAR_CHECK', 'RADAR_IMPORT_YOUTUBE_SUBS',
   'RADAR_IMPORT_X_FOLLOWING', 'RADAR_ADD_TARGET', 'RADAR_GENERATE_EPISODE',
   'SUMMARIZE_YOUTUBE_VIDEO', 'SUMMARIZE_ACTIVE_YOUTUBE_TAB', 'ORGANIZE_GEMINI_NOTEBOOK',
 ]);
@@ -1882,18 +1892,40 @@ function handleRequest(
         );
       return true;
 
+    case 'AUTO_PUBLISH_EPISODE':
+      void startAutoPublishPipeline(message.episodeId, message.platforms, message.autoSubmit)
+        .then((status) => sendResponse({ ok: true, status }))
+        .catch((err: unknown) =>
+          sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) })
+        );
+      return true;
+
+    case 'CANCEL_PUBLISH_PIPELINE':
+      cancelPublishPipeline('自動投稿パイプラインを中止しました。');
+      sendResponse({ ok: true, status: { ...publishPipeline } });
+      return false;
+
+    case 'GET_PUBLISH_STATUS':
+      sendResponse({ ok: true, status: { ...publishPipeline } });
+      return false;
+
     case 'GET_PENDING_PUBLISH_JOB':
       sendResponse({ ok: true, job: isPublishTarget(sender) ? pendingPublishJob : null });
       return false;
 
     case 'GET_PENDING_PUBLISH_VIDEO_CHUNK':
       void (async () => {
-        if (!isPublishTarget(sender) || !pendingPublishJob || pendingPublishJob.id !== message.jobId) {
+        const expectedMediaId = pendingPublishJob?.mediaJobId || pendingPublishJob?.id;
+        if (
+          !isPublishTarget(sender) ||
+          !pendingPublishJob ||
+          (pendingPublishJob.id !== message.jobId && expectedMediaId !== message.jobId)
+        ) {
           sendResponse({ ok: false, error: '公開動画データが見つかりません。' });
           return;
         }
         if (!pendingPublishVideoBlob) {
-          const media = await getPublishMedia(message.jobId);
+          const media = await getPublishMedia(expectedMediaId || message.jobId);
           pendingPublishVideoBlob = media?.blob ?? null;
         }
         if (!pendingPublishVideoBlob) {
@@ -1911,13 +1943,25 @@ function handleRequest(
       );
       return true;
 
+    case 'REPORT_PUBLISH_RESULT':
+      if (!isPublishTarget(sender)) {
+        sendResponse({ ok: false, error: '公開結果の送信元が無効です。' });
+        return false;
+      }
+      void handlePublishResult(message)
+        .then(() => sendResponse({ ok: true }))
+        .catch((err: unknown) =>
+          sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) })
+        );
+      return true;
+
     case 'CLEAR_PENDING_PUBLISH_JOB':
       if (isPublishTarget(sender)) {
-        const jobId = pendingPublishJob?.id;
+        const jobId = pendingPublishJob?.mediaJobId || pendingPublishJob?.id;
         pendingPublishJob = null;
         pendingPublishTabId = undefined;
         pendingPublishVideoBlob = null;
-        if (jobId) {
+        if (jobId && publishPipeline.remainingPlatforms.length === 0) {
           void clearPublishMedia(jobId).catch(() => {});
         }
       }
@@ -2082,6 +2126,366 @@ let pendingPublishJob: PendingPublishJob | null = null;
 let pendingPublishTabId: number | undefined;
 let pendingPublishVideoBlob: Blob | null = null;
 
+interface InternalPublishPipeline extends PublishPipelineStatus {
+  autoSubmit: boolean;
+  mediaJobId?: string;
+  fileName?: string;
+  videoSizeBytes?: number;
+  hasVideo: boolean;
+}
+
+const publishPipeline: InternalPublishPipeline = {
+  running: false,
+  episodeId: null,
+  currentPlatform: null,
+  remainingPlatforms: [],
+  message: '',
+  error: '',
+  autoSubmit: true,
+  hasVideo: false,
+};
+
+function broadcastPublishStatus(): void {
+  const status: PublishPipelineStatus = {
+    running: publishPipeline.running,
+    episodeId: publishPipeline.episodeId,
+    currentPlatform: publishPipeline.currentPlatform,
+    remainingPlatforms: [...publishPipeline.remainingPlatforms],
+    message: publishPipeline.message,
+    error: publishPipeline.error,
+    youtubeUrl: publishPipeline.youtubeUrl,
+    xUrl: publishPipeline.xUrl,
+  };
+  broadcastEvent({ type: 'PUBLISH_STATUS', status });
+}
+
+function resetPublishPipeline(message = '', error = ''): void {
+  const mediaToClear = publishPipeline.mediaJobId;
+  publishPipeline.running = false;
+  publishPipeline.currentPlatform = null;
+  publishPipeline.remainingPlatforms = [];
+  publishPipeline.message = message;
+  publishPipeline.error = error;
+  publishPipeline.mediaJobId = undefined;
+  publishPipeline.fileName = undefined;
+  publishPipeline.videoSizeBytes = undefined;
+  publishPipeline.hasVideo = false;
+  if (mediaToClear && (!pendingPublishJob || pendingPublishJob.mediaJobId === mediaToClear)) {
+    void clearPublishMedia(mediaToClear).catch(() => {});
+  }
+  broadcastPublishStatus();
+}
+
+function cancelPublishPipeline(reason: string): void {
+  const mediaToClear = publishPipeline.mediaJobId || pendingPublishJob?.mediaJobId || pendingPublishJob?.id;
+  pendingPublishJob = null;
+  pendingPublishTabId = undefined;
+  pendingPublishVideoBlob = null;
+  publishPipeline.running = false;
+  publishPipeline.currentPlatform = null;
+  publishPipeline.remainingPlatforms = [];
+  publishPipeline.message = reason;
+  publishPipeline.error = '';
+  publishPipeline.mediaJobId = undefined;
+  publishPipeline.fileName = undefined;
+  publishPipeline.videoSizeBytes = undefined;
+  publishPipeline.hasVideo = false;
+  if (mediaToClear) {
+    void clearPublishMedia(mediaToClear).catch(() => {});
+  }
+  broadcastPublishStatus();
+}
+
+async function renderEpisodeMp4InOffscreen(
+  episodeId: string,
+  mediaJobId: string
+): Promise<{ hasVideo: boolean; fileName?: string; videoSizeBytes?: number }> {
+  await ensureOffscreenDocument();
+  const res = (await chrome.runtime.sendMessage({
+    type: 'OFFSCREEN_RENDER_MP4',
+    episodeId,
+    jobId: mediaJobId,
+  } satisfies RuntimeRequest)) as {
+    ok?: boolean;
+    error?: string;
+    hasVideo?: boolean;
+    fileName?: string;
+    videoSizeBytes?: number;
+  };
+  if (!res?.ok) {
+    throw new Error(res?.error || 'バックグラウンドでの MP4 動画生成に失敗しました。');
+  }
+  return {
+    hasVideo: Boolean(res.hasVideo),
+    fileName: res.fileName,
+    videoSizeBytes: res.videoSizeBytes,
+  };
+}
+
+async function launchPublishPlatformStep(platform: 'youtube' | 'x'): Promise<void> {
+  const episodeId = publishPipeline.episodeId;
+  if (!episodeId) {
+    throw new Error('公開対象のエピソードが指定されていません。');
+  }
+  const episode = await db.episodes.get(episodeId);
+  if (!episode) {
+    throw new Error('公開対象のエピソードが見つかりませんでした。');
+  }
+  const settings = await getSettings();
+  const jobId = `pub-${platform}-${Date.now()}`;
+
+  publishPipeline.currentPlatform = platform;
+  publishPipeline.error = '';
+
+  if (platform === 'youtube') {
+    const targetUrl = buildYouTubeStudioUploadUrl(settings.publish.youtubeChannelIdOrUrl);
+    const ytMeta = buildYouTubeMetadata(episode, settings.publish);
+    publishPipeline.message = 'YouTube Studio を開いて自動公開を開始しています...';
+    broadcastPublishStatus();
+
+    const job: PendingPublishJob = {
+      id: jobId,
+      episodeId,
+      mediaJobId: publishPipeline.mediaJobId,
+      platform: 'youtube',
+      targetUrl,
+      title: ytMeta.title,
+      description: ytMeta.description,
+      postText: '',
+      threadReplyText: '',
+      visibility: settings.publish.youtubeDefaultVisibility,
+      channelName: settings.publish.youtubeChannelName,
+      autoSubmit: publishPipeline.autoSubmit,
+      fileName: publishPipeline.fileName,
+      mimeType: 'video/mp4',
+      hasVideo: publishPipeline.hasVideo,
+      videoSizeBytes: publishPipeline.videoSizeBytes,
+      createdAt: Date.now(),
+    };
+    await startPublishJob(job);
+    return;
+  }
+
+  // X.com step (incorporates YouTube URL if available)
+  const ytUrl = publishPipeline.youtubeUrl || episode.publishedYouTubeUrl;
+  const xPayload = buildXPostPayload(episode, settings.publish, { youtubeUrl: ytUrl });
+  const targetUrl = `https://x.com/compose/post?text=${encodeURIComponent(xPayload.postText)}`;
+  const attachVideo = Boolean(settings.publish.xAttachVideo && publishPipeline.hasVideo);
+
+  publishPipeline.message = ytUrl
+    ? 'YouTube URL を含めて X.com 自動投稿を開始しています...'
+    : 'X.com を開いて自動投稿を開始しています...';
+  broadcastPublishStatus();
+
+  const job: PendingPublishJob = {
+    id: jobId,
+    episodeId,
+    mediaJobId: attachVideo ? publishPipeline.mediaJobId : undefined,
+    platform: 'x',
+    targetUrl,
+    title: episode.title,
+    description: '',
+    postText: xPayload.postText,
+    threadReplyText: xPayload.threadReplyText,
+    expectedXHandle: settings.publish.xAccountHandle,
+    youtubeUrl: ytUrl,
+    autoSubmit: publishPipeline.autoSubmit,
+    fileName: attachVideo ? publishPipeline.fileName : undefined,
+    mimeType: 'video/mp4',
+    hasVideo: attachVideo,
+    videoSizeBytes: attachVideo ? publishPipeline.videoSizeBytes : undefined,
+    createdAt: Date.now(),
+  };
+  await startPublishJob(job);
+}
+
+async function startAutoPublishPipeline(
+  episodeId: string,
+  platforms: ('youtube' | 'x')[],
+  autoSubmitOverride?: boolean
+): Promise<PublishPipelineStatus> {
+  if (publishPipeline.running) {
+    throw new Error('現在別の自動投稿パイプラインが実行中です。完了または中止してから実行してください。');
+  }
+
+  const uniquePlatforms = Array.from(new Set(platforms));
+  // Always run YouTube before X so X can include the published YouTube video URL
+  const ordered: ('youtube' | 'x')[] = [];
+  if (uniquePlatforms.includes('youtube')) ordered.push('youtube');
+  if (uniquePlatforms.includes('x')) ordered.push('x');
+  if (ordered.length === 0) {
+    throw new Error('投稿先プラットフォームが指定されていません。');
+  }
+
+  const episode = await db.episodes.get(episodeId);
+  if (!episode) {
+    throw new Error('エピソードが見つかりません。');
+  }
+  if (episode.status !== 'ready') {
+    throw new Error('音声生成が完了したエピソードのみ自動投稿できます。');
+  }
+
+  const settings = await getSettings();
+  const autoSubmit =
+    typeof autoSubmitOverride === 'boolean'
+      ? autoSubmitOverride
+      : settings.publish.autoPublishMode !== 'manual_confirm';
+
+  // Verify host permissions upfront
+  if (ordered.includes('youtube')) {
+    const ytUrl = buildYouTubeStudioUploadUrl(settings.publish.youtubeChannelIdOrUrl);
+    if (!(await canReadPage(ytUrl))) {
+      throw new Error('YouTube Studio (studio.youtube.com) へのアクセス許可がありません。設定から許可してください。');
+    }
+  }
+  if (ordered.includes('x')) {
+    if (!(await canReadPage('https://x.com/'))) {
+      throw new Error('X.com (x.com) へのアクセス許可がありません。設定から許可してください。');
+    }
+  }
+
+  const hasAudio = episode.chapters.some((c) => c.hasAudioBlob);
+  const needsVideo =
+    hasAudio && (ordered.includes('youtube') || (ordered.includes('x') && settings.publish.xAttachVideo));
+
+  publishPipeline.running = true;
+  publishPipeline.episodeId = episodeId;
+  publishPipeline.currentPlatform = ordered[0];
+  publishPipeline.remainingPlatforms = ordered.slice(1);
+  publishPipeline.autoSubmit = autoSubmit;
+  publishPipeline.youtubeUrl = episode.publishedYouTubeUrl;
+  publishPipeline.xUrl = episode.publishedXUrl;
+  publishPipeline.error = '';
+  publishPipeline.hasVideo = false;
+  publishPipeline.mediaJobId = undefined;
+  publishPipeline.fileName = undefined;
+  publishPipeline.videoSizeBytes = undefined;
+  publishPipeline.message = needsVideo
+    ? 'ポッドキャスト動画 (MP4) をレンダリング中...'
+    : '投稿データを準備中...';
+  broadcastPublishStatus();
+
+  try {
+    if (needsVideo) {
+      const mediaJobId = `pub-media-${episodeId}-${Date.now()}`;
+      const rendered = await renderEpisodeMp4InOffscreen(episodeId, mediaJobId);
+      publishPipeline.hasVideo = rendered.hasVideo;
+      if (rendered.hasVideo) {
+        publishPipeline.mediaJobId = mediaJobId;
+        publishPipeline.fileName = rendered.fileName;
+        publishPipeline.videoSizeBytes = rendered.videoSizeBytes;
+      }
+    }
+
+    await launchPublishPlatformStep(ordered[0]);
+    return {
+      running: publishPipeline.running,
+      episodeId: publishPipeline.episodeId,
+      currentPlatform: publishPipeline.currentPlatform,
+      remainingPlatforms: [...publishPipeline.remainingPlatforms],
+      message: publishPipeline.message,
+      error: publishPipeline.error,
+      youtubeUrl: publishPipeline.youtubeUrl,
+      xUrl: publishPipeline.xUrl,
+    };
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    resetPublishPipeline('', errMsg);
+    throw err;
+  }
+}
+
+async function handlePublishResult(msg: {
+  jobId: string;
+  platform: 'youtube' | 'x';
+  status: 'progress' | 'completed' | 'failed' | 'cancelled';
+  message?: string;
+  publishedUrl?: string;
+}): Promise<void> {
+  if (msg.status === 'progress') {
+    if (publishPipeline.running) {
+      publishPipeline.message = msg.message || publishPipeline.message;
+      broadcastPublishStatus();
+    }
+    return;
+  }
+
+  const episodeId = pendingPublishJob?.episodeId || publishPipeline.episodeId;
+
+  if (msg.status === 'completed') {
+    if (episodeId) {
+      const nowIso = new Date().toISOString();
+      if (msg.platform === 'youtube') {
+        await db.episodes.update(episodeId, {
+          publishedYouTubeUrl: msg.publishedUrl || undefined,
+          publishedYouTubeAt: nowIso,
+          updatedAt: nowIso,
+        });
+        if (msg.publishedUrl) {
+          publishPipeline.youtubeUrl = msg.publishedUrl;
+        }
+      } else if (msg.platform === 'x') {
+        await db.episodes.update(episodeId, {
+          publishedXUrl: msg.publishedUrl || undefined,
+          publishedXAt: nowIso,
+          updatedAt: nowIso,
+        });
+        if (msg.publishedUrl) {
+          publishPipeline.xUrl = msg.publishedUrl;
+        }
+      }
+      broadcastEvent({ type: 'EPISODES_UPDATED', episodeId });
+    }
+
+    if (publishPipeline.running && publishPipeline.remainingPlatforms.length > 0) {
+      const nextPlatform = publishPipeline.remainingPlatforms.shift()!;
+      publishPipeline.message =
+        msg.platform === 'youtube'
+          ? 'YouTube 公開完了！続けて X.com への自動投稿を開始します...'
+          : '次のプラットフォームへ自動投稿を開始します...';
+      broadcastPublishStatus();
+      try {
+        await launchPublishPlatformStep(nextPlatform);
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        resetPublishPipeline('', `後続投稿エラー: ${errMsg}`);
+      }
+      return;
+    }
+
+    resetPublishPipeline(msg.message || '自動投稿が完了しました！', '');
+    return;
+  }
+
+  if (msg.status === 'cancelled') {
+    cancelPublishPipeline(msg.message || '自動投稿を中止しました。');
+    return;
+  }
+
+  // failed
+  resetPublishPipeline('', msg.message || `${msg.platform} への自動投稿に失敗しました。`);
+}
+
+async function triggerAutoPublishAfterGenerate(episodeId: string): Promise<void> {
+  const settings = await getSettings();
+  const targets: ('youtube' | 'x')[] = [];
+  if (settings.publish.autoPublishAfterGenerateYouTube) targets.push('youtube');
+  if (settings.publish.autoPublishAfterGenerateX) targets.push('x');
+  if (targets.length === 0) return;
+
+  try {
+    await startAutoPublishPipeline(
+      episodeId,
+      targets,
+      settings.publish.autoPublishMode !== 'manual_confirm'
+    );
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    publishPipeline.error = `生成後の自動投稿を開始できませんでした: ${errMsg}`;
+    broadcastPublishStatus();
+  }
+}
+
 function isPublishTarget(sender: chrome.runtime.MessageSender): boolean {
   return Boolean(sender.url && pendingPublishJob && pendingPublishTabId !== undefined &&
     sender.tab?.id === pendingPublishTabId &&
@@ -2131,14 +2535,23 @@ async function startPublishJob(job: PendingPublishJob): Promise<number | undefin
     }
   };
 
-  const cleanup = () => {
+  const cleanup = (tabClosedByUser = false) => {
     if (pendingPublishTabId === tabId) {
-      const jobId = pendingPublishJob?.id;
+      const activeJob = pendingPublishJob;
+      const mediaId = activeJob?.mediaJobId || activeJob?.id;
       pendingPublishJob = null;
       pendingPublishTabId = undefined;
       pendingPublishVideoBlob = null;
-      if (jobId) {
-        void clearPublishMedia(jobId).catch(() => {});
+      if (
+        tabClosedByUser &&
+        publishPipeline.running &&
+        publishPipeline.currentPlatform === job.platform
+      ) {
+        cancelPublishPipeline(
+          `${job.platform === 'youtube' ? 'YouTube Studio' : 'X.com'} のタブが閉じられたため自動投稿を中断しました。`
+        );
+      } else if (mediaId && publishPipeline.remainingPlatforms.length === 0) {
+        void clearPublishMedia(mediaId).catch(() => {});
       }
     }
     chrome.tabs.onUpdated.removeListener(onUpdated);
@@ -2146,12 +2559,12 @@ async function startPublishJob(job: PendingPublishJob): Promise<number | undefin
   };
 
   const onRemoved = (removedTabId: number) => {
-    if (removedTabId === tabId) cleanup();
+    if (removedTabId === tabId) cleanup(true);
   };
 
   chrome.tabs.onUpdated.addListener(onUpdated);
   chrome.tabs.onRemoved.addListener(onRemoved);
-  setTimeout(cleanup, 10 * 60 * 1000);
+  setTimeout(() => cleanup(false), 10 * 60 * 1000);
 
   void (async () => {
     await waitForTabReady(tabId, 16000);

@@ -1,10 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  clearPublishMedia,
   db,
   getSettings,
   getUnreadQueue,
-  savePublishMedia,
 } from '../../storage/db';
 import {
   DEFAULT_SETTINGS,
@@ -16,7 +14,7 @@ import {
   type PodcastEpisode,
   type TabGroupSummary,
 } from '../../shared/types';
-import type { DevBuildStatus, PendingPublishJob, RuntimeRequest } from '../../shared/messages';
+import type { DevBuildStatus, PublishPipelineStatus, RuntimeRequest } from '../../shared/messages';
 import {
   DATA_CONSENT_KEY,
   DATA_CONSENT_REQUIRED,
@@ -33,8 +31,6 @@ import {
   shareEpisodeNative,
 } from '../../shared/export-utils';
 import {
-  buildXPostPayload,
-  buildYouTubeMetadata,
   buildYouTubeStudioUploadUrl,
   renderEpisodeToMp4,
 } from '../../shared/publish-utils';
@@ -192,6 +188,7 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
     ok: boolean;
     text: string;
   } | null>(null);
+  const [publishStatus, setPublishStatus] = useState<PublishPipelineStatus | null>(null);
 
   const activeTurnRef = useRef<HTMLDivElement | null>(null);
 
@@ -562,138 +559,69 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
     }
   };
 
-  const handlePublishToYouTube = async () => {
-    if (!displayedEpisode || isExporting) return;
+  const handleAutoPublish = async (platforms: ('youtube' | 'x')[]) => {
+    if (!displayedEpisode || isExporting || publishStatus?.running) return;
     setErrorBanner('');
     setIsExporting(true);
-    setExportMessage('YouTube 公開用 MP4 動画を準備中...');
-    const jobId = `pub-yt-${Date.now()}`;
-    let savedMedia = false;
+    const isFullAuto = settings.publish.autoPublishMode !== 'manual_confirm';
+    setExportMessage(
+      platforms.length === 2
+        ? 'YouTube → X.com 自動投稿パイプラインを準備中...'
+        : platforms[0] === 'youtube'
+        ? 'YouTube 自動公開を準備中...'
+        : 'X.com 自動投稿を準備中...'
+    );
     try {
-      const targetUrl = buildYouTubeStudioUploadUrl(settings.publish.youtubeChannelIdOrUrl);
-      if (!(await ensureHostPermissionsForUrls([targetUrl]))) {
-        throw new Error('YouTube Studio へのアクセスが許可されませんでした。');
+      const permissionUrls: string[] = [];
+      if (platforms.includes('youtube')) {
+        permissionUrls.push(buildYouTubeStudioUploadUrl(settings.publish.youtubeChannelIdOrUrl));
       }
-      let hasVideo = false;
-      let videoSizeBytes: number | undefined;
-      let fileName: string | undefined;
-      if (hasAudioExportable) {
-        const rendered = await renderEpisodeToMp4(displayedEpisode, (msg) => setExportMessage(msg));
-        if (rendered) {
-          fileName = rendered.fileName;
-          videoSizeBytes = rendered.blob.size;
-          setExportMessage('YouTube Studio へ転送準備中...');
-          await savePublishMedia({
-            jobId,
-            blob: rendered.blob,
-            mimeType: 'video/mp4',
-            fileName: rendered.fileName,
-            sizeBytes: rendered.blob.size,
-            createdAt: Date.now(),
-          });
-          savedMedia = true;
-          hasVideo = true;
-        }
+      if (platforms.includes('x')) {
+        permissionUrls.push('https://x.com/');
       }
-      const ytMeta = buildYouTubeMetadata(displayedEpisode, settings.publish);
-      const job: PendingPublishJob = {
-        id: jobId,
-        platform: 'youtube',
-        targetUrl,
-        title: ytMeta.title,
-        description: ytMeta.description,
-        postText: '',
-        threadReplyText: '',
-        visibility: settings.publish.youtubeDefaultVisibility,
-        channelName: settings.publish.youtubeChannelName,
-        fileName,
-        mimeType: 'video/mp4',
-        hasVideo,
-        videoSizeBytes,
-        createdAt: Date.now(),
-      };
-      const res = await chrome.runtime.sendMessage({
-        type: 'START_PUBLISH_JOB',
-        job,
-      } satisfies RuntimeRequest);
-      if (!res?.ok) throw new Error(res?.error || 'YouTube Studio を開けませんでした。');
-      showToast('YouTube Studio を開きました。右下の公開ガイドからセットできます');
+      if (!(await ensureHostPermissionsForUrls(permissionUrls))) {
+        throw new Error('投稿先サイト（YouTube Studio / X.com）へのアクセスが許可されませんでした。');
+      }
+
+      const res = (await chrome.runtime.sendMessage({
+        type: 'AUTO_PUBLISH_EPISODE',
+        episodeId: displayedEpisode.id,
+        platforms,
+        autoSubmit: isFullAuto,
+      } satisfies RuntimeRequest)) as { ok?: boolean; error?: string; status?: PublishPipelineStatus };
+      if (!res?.ok) throw new Error(res?.error || '自動投稿を開始できませんでした。');
+      if (res.status) setPublishStatus(res.status);
+      showToast(
+        isFullAuto
+          ? platforms.length === 2
+            ? 'YouTube 公開 → X.com 投稿の自動パイプラインを開始しました'
+            : platforms[0] === 'youtube'
+            ? 'YouTube 自動公開を開始しました'
+            : 'X.com 自動投稿を開始しました'
+          : '投稿画面を開きました。右下のガイドからセットできます'
+      );
     } catch (err) {
-      if (savedMedia) {
-        void clearPublishMedia(jobId).catch(() => {});
-      }
-      setErrorBanner(`YouTube 公開準備エラー: ${err instanceof Error ? err.message : String(err)}`);
+      setErrorBanner(`自動投稿エラー: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setIsExporting(false);
       setExportMessage('');
     }
   };
 
-  const handlePublishToX = async () => {
-    if (!displayedEpisode || isExporting) return;
-    setErrorBanner('');
-    setIsExporting(true);
-    setExportMessage('X.com 投稿データを準備中...');
-    const jobId = `pub-x-${Date.now()}`;
-    let savedMedia = false;
+  const handleCancelPublish = async () => {
     try {
-      if (!(await ensureHostPermissionsForUrls(['https://x.com/']))) {
-        throw new Error('X へのアクセスが許可されませんでした。');
-      }
-      let hasVideo = false;
-      let videoSizeBytes: number | undefined;
-      let fileName: string | undefined;
-      if (settings.publish.xAttachVideo && hasAudioExportable) {
-        const rendered = await renderEpisodeToMp4(displayedEpisode, (msg) => setExportMessage(msg));
-        if (rendered) {
-          fileName = rendered.fileName;
-          videoSizeBytes = rendered.blob.size;
-          setExportMessage('X.com へ転送準備中...');
-          await savePublishMedia({
-            jobId,
-            blob: rendered.blob,
-            mimeType: 'video/mp4',
-            fileName: rendered.fileName,
-            sizeBytes: rendered.blob.size,
-            createdAt: Date.now(),
-          });
-          savedMedia = true;
-          hasVideo = true;
-        }
-      }
-      const xPayload = buildXPostPayload(displayedEpisode, settings.publish);
-      const targetUrl = `https://x.com/compose/post?text=${encodeURIComponent(xPayload.postText)}`;
-      const job: PendingPublishJob = {
-        id: jobId,
-        platform: 'x',
-        targetUrl,
-        title: displayedEpisode.title,
-        description: '',
-        postText: xPayload.postText,
-        threadReplyText: xPayload.threadReplyText,
-        expectedXHandle: settings.publish.xAccountHandle,
-        fileName,
-        mimeType: 'video/mp4',
-        hasVideo,
-        videoSizeBytes,
-        createdAt: Date.now(),
-      };
-      const res = await chrome.runtime.sendMessage({
-        type: 'START_PUBLISH_JOB',
-        job,
+      await chrome.runtime.sendMessage({
+        type: 'CANCEL_PUBLISH_PIPELINE',
       } satisfies RuntimeRequest);
-      if (!res?.ok) throw new Error(res?.error || 'X を開けませんでした。');
-      showToast('X.com の投稿画面を開きました');
-    } catch (err) {
-      if (savedMedia) {
-        void clearPublishMedia(jobId).catch(() => {});
-      }
-      setErrorBanner(`X.com 投稿準備エラー: ${err instanceof Error ? err.message : String(err)}`);
-    } finally {
-      setIsExporting(false);
-      setExportMessage('');
+      showToast('自動投稿を中止しました');
+    } catch {
+      // ignore
     }
   };
+
+  const handlePublishToYouTube = () => handleAutoPublish(['youtube']);
+  const handlePublishToX = () => handleAutoPublish(['x']);
+  const handlePublishBoth = () => handleAutoPublish(['youtube', 'x']);
 
   const handleStartGeminiKeySetup = async () => {
     setErrorBanner('');
@@ -953,6 +881,20 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
           </div>
         )}
 
+        {publishStatus?.running && (
+          <div className="status-banner" role="status">
+            <span>{publishStatus.message || '自動投稿を実行中...'}</span>
+            <button
+              type="button"
+              className="btn-ghost"
+              onClick={() => void handleCancelPublish()}
+              aria-label="自動投稿を中止"
+            >
+              中止
+            </button>
+          </div>
+        )}
+
         {(errorBanner || displayedEpisode?.errorMessage) && (
           <div className="status-banner is-error" role="alert">
             <span>{errorBanner || displayedEpisode?.errorMessage}</span>
@@ -1039,6 +981,7 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
             isResynthRunning={isResynthRunning}
             hasAudioExportable={hasAudioExportable}
             isExporting={isExporting}
+            isPublishing={Boolean(publishStatus?.running)}
             activeTurnRef={activeTurnRef}
             formatSec={formatSec}
             formatEpisodeTimestamp={formatEpisodeTimestamp}
@@ -1059,6 +1002,7 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
             onShareNative={() => void handleShareEpisode()}
             onPublishYouTube={() => void handlePublishToYouTube()}
             onPublishX={() => void handlePublishToX()}
+            onPublishBoth={() => void handlePublishBoth()}
             onDownloadMp4={() => void handleDownloadMp4()}
             onCreateDemo={() => void handleCreateDemo()}
             onGoToPatrol={() => setTab('patrol')}

@@ -3,6 +3,7 @@ import {
   GEMINI_TTS_MODELS,
   GEMINI_VOICES,
   OPENAI_TTS_MODELS,
+  type AutoPublishMode,
   type BuildMeta,
   type DurationMode,
   type ExtensionSettings,
@@ -10,6 +11,8 @@ import {
 } from '../../shared/types';
 import type { RuntimeRequest } from '../../shared/messages';
 import { DATA_CONSENT_REQUIRED, PRIVACY_POLICY_URL } from '../../shared/data-consent';
+import { ensureHostPermissionsForUrls } from '../../shared/permissions';
+import { buildYouTubeStudioUploadUrl } from '../../shared/publish-utils';
 
 interface SettingsPanelProps {
   settings: ExtensionSettings;
@@ -506,9 +509,79 @@ export function SettingsPanel({
       </div>
 
       {/* Publish Settings */}
-      <details className="n-card extract-details">
-        <summary>公開先設定（YouTube / X.com）</summary>
+      <details className="n-card extract-details" open>
+        <summary>自動投稿・公開先設定（YouTube / X.com）</summary>
         <div style={{ marginTop: 10 }}>
+          <div className="field-row">
+            <label className="field-label">自動投稿の実行モード</label>
+            <select
+              className="field-select"
+              value={settings.publish.autoPublishMode || 'full_auto'}
+              onChange={(e) =>
+                void onPatchSettings({
+                  publish: {
+                    ...settings.publish,
+                    autoPublishMode: e.target.value as AutoPublishMode,
+                  },
+                })
+              }
+            >
+              <option value="full_auto">完全自動（動画添付〜最終「公開/ポスト」ボタンまで自動）</option>
+              <option value="manual_confirm">半自動（ガイド表示・手動確認して公開）</option>
+            </select>
+            <p className="field-hint">
+              ログイン済みの YouTube Studio / X.com セッションを使って自動投稿します（APIキー不要・実行中も画面右下の「中止」でいつでも止められます）。
+            </p>
+          </div>
+          <div className="toggle-row">
+            <div>
+              <div>番組生成完了後に自動で YouTube 公開</div>
+              <p className="field-hint">
+                音声合成が終わると自動で MP4 動画を作成し YouTube Studio へ公開します。
+              </p>
+            </div>
+            <input
+              type="checkbox"
+              checked={Boolean(settings.publish.autoPublishAfterGenerateYouTube)}
+              onChange={(e) => {
+                const checked = e.target.checked;
+                void (async () => {
+                  if (checked) {
+                    const ytUrl = buildYouTubeStudioUploadUrl(
+                      settings.publish.youtubeChannelIdOrUrl
+                    );
+                    if (!(await ensureHostPermissionsForUrls([ytUrl]))) return;
+                  }
+                  await onPatchSettings({
+                    publish: { ...settings.publish, autoPublishAfterGenerateYouTube: checked },
+                  });
+                })();
+              }}
+            />
+          </div>
+          <div className="toggle-row">
+            <div>
+              <div>番組生成完了後に自動で X.com 投稿</div>
+              <p className="field-hint">
+                YouTube 自動公開も ON の場合は、YouTube 公開完了後に動画 URL を取得してから X へ自動投稿します。
+              </p>
+            </div>
+            <input
+              type="checkbox"
+              checked={Boolean(settings.publish.autoPublishAfterGenerateX)}
+              onChange={(e) => {
+                const checked = e.target.checked;
+                void (async () => {
+                  if (checked) {
+                    if (!(await ensureHostPermissionsForUrls(['https://x.com/']))) return;
+                  }
+                  await onPatchSettings({
+                    publish: { ...settings.publish, autoPublishAfterGenerateX: checked },
+                  });
+                })();
+              }}
+            />
+          </div>
           <div className="field-row">
             <label className="field-label">YouTube チャンネルID または URL</label>
             <input
@@ -542,7 +615,20 @@ export function SettingsPanel({
             </select>
           </div>
           <div className="field-row">
-            <label className="field-label">X.com 投稿先ハンドル</label>
+            <label className="field-label">YouTube ハッシュタグ</label>
+            <input
+              className="field-input"
+              placeholder="#agentCast #AIポッドキャスト"
+              value={settings.publish.youtubeHashtags}
+              onChange={(e) =>
+                void onPatchSettings({
+                  publish: { ...settings.publish, youtubeHashtags: e.target.value },
+                })
+              }
+            />
+          </div>
+          <div className="field-row">
+            <label className="field-label">X.com 投稿先ハンドル（誤爆防止チェック）</label>
             <input
               className="field-input"
               placeholder="@your_handle"
@@ -550,6 +636,31 @@ export function SettingsPanel({
               onChange={(e) =>
                 void onPatchSettings({
                   publish: { ...settings.publish, xAccountHandle: e.target.value },
+                })
+              }
+            />
+          </div>
+          <div className="field-row">
+            <label className="field-label">X.com ハッシュタグ</label>
+            <input
+              className="field-input"
+              placeholder="#agentCast #AIラジオ"
+              value={settings.publish.xHashtags}
+              onChange={(e) =>
+                void onPatchSettings({
+                  publish: { ...settings.publish, xHashtags: e.target.value },
+                })
+              }
+            />
+          </div>
+          <div className="toggle-row">
+            <span>YouTube 公開後の動画 URL を X 投稿本文に自動挿入</span>
+            <input
+              type="checkbox"
+              checked={settings.publish.xIncludeYouTubeUrl !== false}
+              onChange={(e) =>
+                void onPatchSettings({
+                  publish: { ...settings.publish, xIncludeYouTubeUrl: e.target.checked },
                 })
               }
             />

@@ -33,6 +33,7 @@ interface PlayerPanelProps {
   isResynthRunning: boolean;
   hasAudioExportable: boolean;
   isExporting: boolean;
+  isPublishing?: boolean;
   activeTurnRef: React.RefObject<HTMLDivElement | null>;
   formatSec: (sec: number) => string;
   formatEpisodeTimestamp: (iso?: string) => string;
@@ -53,6 +54,7 @@ interface PlayerPanelProps {
   onShareNative: () => void;
   onPublishYouTube: () => void;
   onPublishX: () => void;
+  onPublishBoth?: () => void;
   onDownloadMp4: () => void;
   onCreateDemo: () => void;
   onGoToPatrol: () => void;
@@ -72,6 +74,7 @@ export function PlayerPanel({
   isResynthRunning,
   hasAudioExportable,
   isExporting,
+  isPublishing = false,
   activeTurnRef,
   formatSec,
   formatEpisodeTimestamp,
@@ -92,6 +95,7 @@ export function PlayerPanel({
   onShareNative,
   onPublishYouTube,
   onPublishX,
+  onPublishBoth,
   onDownloadMp4,
   onCreateDemo,
   onGoToPatrol,
@@ -433,17 +437,36 @@ export function PlayerPanel({
               </button>
               <button
                 type="button"
+                className="btn-primary btn-compact"
+                disabled={isExporting || isPublishing || displayedEpisode.status !== 'ready'}
+                onClick={onPublishBoth}
+                title="YouTube へ自動公開したあと、取得した動画 URL を含めて X.com へ連続自動投稿します"
+              >
+                {isPublishing ? '🚀 自動投稿中...' : '🚀 YT→X自動投稿'}
+              </button>
+              <button
+                type="button"
                 className="btn-secondary btn-compact"
-                disabled={isExporting || displayedEpisode.status !== 'ready'}
+                disabled={isExporting || isPublishing || displayedEpisode.status !== 'ready'}
                 onClick={onPublishYouTube}
+                title={
+                  settings.publish.autoPublishMode !== 'manual_confirm'
+                    ? 'YouTube Studio で動画アップロード〜公開まで自動実行'
+                    : 'YouTube Studio を開いて公開ガイドを表示'
+                }
               >
                 📺 YouTube公開
               </button>
               <button
                 type="button"
                 className="btn-secondary btn-compact"
-                disabled={isExporting || displayedEpisode.status !== 'ready'}
+                disabled={isExporting || isPublishing || displayedEpisode.status !== 'ready'}
                 onClick={onPublishX}
+                title={
+                  settings.publish.autoPublishMode !== 'manual_confirm'
+                    ? 'X.com で動画添付〜ポストまで自動実行（YouTube公開済みならURLも自動挿入）'
+                    : 'X.com の投稿画面を開いてガイドを表示'
+                }
               >
                 𝕏 X投稿
               </button>
@@ -456,6 +479,41 @@ export function PlayerPanel({
                 🎬 MP4
               </button>
             </div>
+
+            {(displayedEpisode.publishedYouTubeUrl || displayedEpisode.publishedXUrl) && (
+              <div
+                style={{
+                  display: 'flex',
+                  flexWrap: 'wrap',
+                  gap: 8,
+                  marginTop: 8,
+                  fontSize: 12,
+                }}
+              >
+                {displayedEpisode.publishedYouTubeUrl && (
+                  <a
+                    href={displayedEpisode.publishedYouTubeUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="btn-ghost"
+                    style={{ padding: '2px 8px', textDecoration: 'none' }}
+                  >
+                    ✅ YouTube 公開済み ↗
+                  </a>
+                )}
+                {displayedEpisode.publishedXUrl && (
+                  <a
+                    href={displayedEpisode.publishedXUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="btn-ghost"
+                    style={{ padding: '2px 8px', textDecoration: 'none' }}
+                  >
+                    ✅ X 投稿済み ↗
+                  </a>
+                )}
+              </div>
+            )}
 
             {showResynth && (
               <div

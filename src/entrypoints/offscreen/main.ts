@@ -1,5 +1,6 @@
-import { db, makeChapterKey } from '../../storage/db';
+import { db, makeChapterKey, savePublishMedia } from '../../storage/db';
 import type { RuntimeRequest } from '../../shared/messages';
+import { renderEpisodeToMp4 } from '../../shared/publish-utils';
 import {
   INITIAL_PLAYBACK_STATE,
   SOURCE_META,
@@ -368,6 +369,41 @@ chrome.runtime.onMessage.addListener((message: RuntimeRequest, _sender, sendResp
     case 'OFFSCREEN_GET_STATE':
       sendResponse({ ok: true, state });
       return false;
+
+    case 'OFFSCREEN_RENDER_MP4':
+      void (async () => {
+        const episode = await db.episodes.get(message.episodeId);
+        if (!episode) {
+          sendResponse({ ok: false, error: 'エピソードが見つかりません。' });
+          return;
+        }
+        const rendered = await renderEpisodeToMp4(episode);
+        if (!rendered) {
+          sendResponse({ ok: true, hasVideo: false });
+          return;
+        }
+        await savePublishMedia({
+          jobId: message.jobId,
+          blob: rendered.blob,
+          mimeType: 'video/mp4',
+          fileName: rendered.fileName,
+          sizeBytes: rendered.blob.size,
+          createdAt: Date.now(),
+        });
+        sendResponse({
+          ok: true,
+          hasVideo: true,
+          fileName: rendered.fileName,
+          videoSizeBytes: rendered.blob.size,
+          durationSec: rendered.durationSec,
+        });
+      })().catch((err: unknown) => {
+        sendResponse({
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+      return true;
 
     default:
       return false;
