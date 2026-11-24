@@ -30,6 +30,7 @@ interface PlayerPanelProps {
   playback: PlaybackState;
   settings: ExtensionSettings;
   isJobRunning: boolean;
+  isResynthRunning: boolean;
   hasAudioExportable: boolean;
   isExporting: boolean;
   activeTurnRef: React.RefObject<HTMLDivElement | null>;
@@ -68,6 +69,7 @@ export function PlayerPanel({
   playback,
   settings,
   isJobRunning,
+  isResynthRunning,
   hasAudioExportable,
   isExporting,
   activeTurnRef,
@@ -267,7 +269,7 @@ export function PlayerPanel({
                   <button
                     type="button"
                     className="btn-ghost"
-                    disabled={isJobRunning && ep.status !== 'ready'}
+                    disabled={(isJobRunning || isResynthRunning) && ep.status !== 'ready'}
                     onClick={() => onDeleteEpisode(ep.id)}
                     title="この番組を削除"
                     aria-label={`${ep.title} を削除`}
@@ -389,11 +391,11 @@ export function PlayerPanel({
               <button
                 type="button"
                 className={`btn-secondary btn-compact ${showResynth ? 'is-active' : ''}`}
-                disabled={isJobRunning || displayedEpisode.chapters.length === 0}
+                disabled={displayedEpisode.chapters.length === 0}
                 onClick={() => setShowResynth((v) => !v)}
                 title="同じ台本を使って別のTTS・モデルで音声を再作成"
               >
-                🎙 別TTSで再合成
+                {isResynthRunning ? '🎙 再合成中...' : '🎙 別TTSで再合成'}
               </button>
               <button
                 type="button"
@@ -603,7 +605,7 @@ export function PlayerPanel({
                     type="button"
                     className="btn-primary"
                     style={{ width: '100%', marginTop: 8 }}
-                    disabled={isJobRunning}
+                    disabled={isResynthRunning}
                     onClick={() => {
                       setShowResynth(false);
                       void onResynthesizeEpisode({
@@ -617,7 +619,7 @@ export function PlayerPanel({
                       });
                     }}
                   >
-                    🎙 この台本で音声を再作成
+                    {isResynthRunning ? '🎙 音声を再合成中...' : '🎙 この台本で音声を再作成'}
                   </button>
                 )}
               </div>

@@ -95,6 +95,9 @@ let latestPlaybackState: PlaybackState = { ...INITIAL_PLAYBACK_STATE };
 let isJobRunning = false;
 let currentJobMessage = '';
 let lastJobError = '';
+let isResynthRunning = false;
+let currentResynthMessage = '';
+let activeResynthEpisodeId: string | null = null;
 /** videoId → progress message for in-flight YouTube digests (not exclusive with patrol jobs). */
 const digestInProgress = new Map<string, string>();
 
@@ -103,9 +106,13 @@ chrome.sidePanel
   .setPanelBehavior({ openPanelOnActionClick: true })
   .catch((err) => console.warn('[agentCast] sidePanel.setPanelBehavior warning:', err));
 
-// Guard Dev Auto-Reloader during BOTH audio playback AND active generation jobs!
+// Guard Dev Auto-Reloader during playback, generation, resynthesis, and digest jobs!
 startDevAutoReloader(
-  () => latestPlaybackState.isPlaying || isJobRunning || digestInProgress.size > 0
+  () =>
+    latestPlaybackState.isPlaying ||
+    isJobRunning ||
+    isResynthRunning ||
+    digestInProgress.size > 0
 );
 
 /**
@@ -125,7 +132,9 @@ async function cleanupStaleEpisodes(deleteStale = false): Promise<number> {
     if (!isPending && !(deleteStale && ep.status === 'error')) continue;
 
     const lastTouch = Date.parse(ep.updatedAt || ep.createdAt) || 0;
-    const isOrphaned = !isJobRunning && (deleteStale || now - lastTouch > 150_000);
+    const isActiveResynthTarget = isResynthRunning && activeResynthEpisodeId === ep.id;
+    const isOrphaned =
+      !isJobRunning && !isActiveResynthTarget && (deleteStale || now - lastTouch > 150_000);
     if (!isOrphaned) continue;
 
     if (deleteStale || ep.chapters.length === 0) {
@@ -276,6 +285,11 @@ function updateJobProgress(message: string): void {
   broadcastEvent({ type: 'PATROL_PROGRESS', message, isJobRunning });
 }
 
+function updateResynthProgress(message: string): void {
+  currentResynthMessage = message;
+  broadcastEvent({ type: 'RESYNTH_PROGRESS', message, isResynthRunning });
+}
+
 async function runBackgroundJob(
   initialMessage: string,
   task: () => Promise<{ warnings?: string[] } | void>
@@ -298,6 +312,32 @@ async function runBackgroundJob(
     isJobRunning = false;
     updateJobProgress('');
     broadcastEvent({ type: 'JOB_FINISHED', error: lastJobError });
+  }
+}
+
+async function runResynthJob(
+  initialMessage: string,
+  task: () => Promise<{ warnings?: string[] } | void>
+): Promise<void> {
+  if (isResynthRunning) return;
+  isResynthRunning = true;
+  updateResynthProgress(initialMessage);
+
+  let resynthError = '';
+  try {
+    const res = await withServiceWorkerKeepAlive(task);
+    if (res && Array.isArray(res.warnings) && res.warnings.length > 0) {
+      resynthError = res.warnings.join(' / ');
+      broadcastEvent({ type: 'JOB_WARNING', message: resynthError });
+    }
+  } catch (err) {
+    resynthError = err instanceof Error ? err.message : String(err);
+    broadcastEvent({ type: 'RESYNTH_ERROR', message: resynthError });
+  } finally {
+    isResynthRunning = false;
+    activeResynthEpisodeId = null;
+    updateResynthProgress('');
+    broadcastEvent({ type: 'RESYNTH_FINISHED', error: resynthError });
   }
 }
 
@@ -1143,9 +1183,11 @@ async function resynthesizeEpisodeAudio(options: {
     hasAudioBlob: false,
   }));
 
-  if (mode === 'overwrite') {
+  if (mode === 'overwrite' && effectiveSettings.ttsMode === 'macos_speech') {
     await db.chapterAudio.where('episodeId').equals(targetEpisodeId).delete();
   }
+
+  activeResynthEpisodeId = targetEpisodeId;
 
   const workingEpisode: PodcastEpisode = {
     ...source,
@@ -1171,6 +1213,7 @@ async function resynthesizeEpisodeAudio(options: {
     let successCount = 0;
     let firstError: string | null = null;
     let autoPlayTriggered = false;
+    const overwrittenIndices = new Set<number>();
 
     for (let i = 0; i < workingEpisode.chapters.length; i++) {
       await requireDataConsent();
@@ -1178,7 +1221,7 @@ async function resynthesizeEpisodeAudio(options: {
       const progressText = `${labels.ttsEngineLabel} でチャプター ${i + 1}/${workingEpisode.chapters.length}「${ch.title.slice(0, 20)}」を再合成中...`;
       workingEpisode.statusDetail = progressText;
       workingEpisode.updatedAt = new Date().toISOString();
-      updateJobProgress(progressText);
+      updateResynthProgress(progressText);
       await db.episodes.put({ ...workingEpisode });
       broadcastEvent({ type: 'EPISODES_UPDATED', episodeId: targetEpisodeId });
 
@@ -1197,6 +1240,7 @@ async function resynthesizeEpisodeAudio(options: {
           durationSec: audioRes.durationSec,
           createdAt: new Date().toISOString(),
         });
+        overwrittenIndices.add(i);
 
         workingEpisode.chapters[i] = {
           ...ch,
@@ -1229,13 +1273,21 @@ async function resynthesizeEpisodeAudio(options: {
         await deleteEpisodeById(targetEpisodeId);
         broadcastEvent({ type: 'EPISODES_UPDATED' });
       } else {
-        workingEpisode.status = 'ready';
-        workingEpisode.statusDetail = undefined;
-        workingEpisode.updatedAt = new Date().toISOString();
-        await db.episodes.put({ ...workingEpisode });
+        await db.episodes.put({
+          ...source,
+          updatedAt: new Date().toISOString(),
+        });
         broadcastEvent({ type: 'EPISODES_UPDATED', episodeId: targetEpisodeId });
       }
       throw new Error(firstError || '音声の再合成に失敗しました。');
+    }
+
+    if (mode === 'overwrite') {
+      for (let i = 0; i < workingEpisode.chapters.length; i++) {
+        if (!overwrittenIndices.has(i)) {
+          await db.chapterAudio.delete(makeChapterKey(targetEpisodeId, i));
+        }
+      }
     }
 
     workingEpisode.status = 'ready';
@@ -1579,12 +1631,12 @@ function handleRequest(
       return false;
 
     case 'RESYNTHESIZE_EPISODE_AUDIO':
-      if (isJobRunning) {
-        sendResponse({ ok: false, error: '現在別の番組生成・再合成が実行中です。' });
+      if (isResynthRunning) {
+        sendResponse({ ok: false, error: '現在別の音声再合成が実行中です。' });
         return false;
       }
       sendResponse({ ok: true, started: true });
-      void runBackgroundJob('同じ台本で別TTSの音声を再作成中...', async () => {
+      void runResynthJob('同じ台本で別TTSの音声を再作成中...', async () => {
         const res = await resynthesizeEpisodeAudio({
           episodeId: message.episodeId,
           ttsMode: message.ttsMode,
@@ -1615,6 +1667,8 @@ function handleRequest(
         isJobRunning,
         message: currentJobMessage,
         lastError: lastJobError,
+        isResynthRunning,
+        resynthMessage: currentResynthMessage,
       });
       return false;
 

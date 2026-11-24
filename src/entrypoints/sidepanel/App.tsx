@@ -169,8 +169,11 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
   const [settings, setSettings] = useState<ExtensionSettings>(DEFAULT_SETTINGS);
   const [playback, setPlayback] = useState<PlaybackState>(INITIAL_PLAYBACK_STATE);
   const [isJobRunning, setIsJobRunning] = useState<boolean>(false);
+  const [isResynthRunning, setIsResynthRunning] = useState<boolean>(false);
   const [isExporting, setIsExporting] = useState<boolean>(false);
   const [busyMessage, setBusyMessage] = useState<string>('');
+  const [resynthMessage, setResynthMessage] = useState<string>('');
+  const [exportMessage, setExportMessage] = useState<string>('');
   const [toastMessage, setToastMessage] = useState<string>('');
   const [errorBanner, setErrorBanner] = useState<string>('');
   const [currentBuild, setCurrentBuild] = useState<BuildMeta | null>(null);
@@ -263,6 +266,8 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
           setIsJobRunning(Boolean(res.isJobRunning));
           if (res.message) setBusyMessage(res.message);
           if (res.lastError) setErrorBanner(res.lastError);
+          setIsResynthRunning(Boolean(res.isResynthRunning));
+          if (res.resynthMessage) setResynthMessage(res.resynthMessage);
         }
       })
       .catch(() => {});
@@ -305,6 +310,19 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
         if (typeof msg.isJobRunning === 'boolean') {
           setIsJobRunning(msg.isJobRunning);
         }
+      } else if (msg?.type === 'RESYNTH_PROGRESS') {
+        setResynthMessage(typeof msg.message === 'string' ? msg.message : '');
+        if (typeof msg.isResynthRunning === 'boolean') {
+          setIsResynthRunning(msg.isResynthRunning);
+        }
+      } else if (msg?.type === 'RESYNTH_ERROR' && typeof msg.message === 'string') {
+        setErrorBanner(msg.message);
+        setIsResynthRunning(false);
+        setResynthMessage('');
+      } else if (msg?.type === 'RESYNTH_FINISHED') {
+        setIsResynthRunning(false);
+        setResynthMessage('');
+        void refreshData();
       } else if (msg?.type === 'JOB_ERROR' && typeof msg.message === 'string') {
         setErrorBanner(msg.message);
         setIsJobRunning(false);
@@ -519,12 +537,12 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
   };
 
   const handleDownloadMp4 = async () => {
-    if (!displayedEpisode || isJobRunning) return;
+    if (!displayedEpisode || isExporting) return;
     setErrorBanner('');
     setIsExporting(true);
-    setBusyMessage('MP4動画をレンダリング中...');
+    setExportMessage('MP4動画をレンダリング中...');
     try {
-      const rendered = await renderEpisodeToMp4(displayedEpisode, (msg) => setBusyMessage(msg));
+      const rendered = await renderEpisodeToMp4(displayedEpisode, (msg) => setExportMessage(msg));
       if (!rendered) {
         setErrorBanner('音声ファイルがないため MP4 を生成できません。');
         return;
@@ -540,15 +558,15 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
       setErrorBanner(`MP4生成エラー: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setIsExporting(false);
-      setBusyMessage('');
+      setExportMessage('');
     }
   };
 
   const handlePublishToYouTube = async () => {
-    if (!displayedEpisode || isJobRunning) return;
+    if (!displayedEpisode || isExporting) return;
     setErrorBanner('');
     setIsExporting(true);
-    setBusyMessage('YouTube 公開用 MP4 動画を準備中...');
+    setExportMessage('YouTube 公開用 MP4 動画を準備中...');
     const jobId = `pub-yt-${Date.now()}`;
     let savedMedia = false;
     try {
@@ -560,11 +578,11 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
       let videoSizeBytes: number | undefined;
       let fileName: string | undefined;
       if (hasAudioExportable) {
-        const rendered = await renderEpisodeToMp4(displayedEpisode, (msg) => setBusyMessage(msg));
+        const rendered = await renderEpisodeToMp4(displayedEpisode, (msg) => setExportMessage(msg));
         if (rendered) {
           fileName = rendered.fileName;
           videoSizeBytes = rendered.blob.size;
-          setBusyMessage('YouTube Studio へ転送準備中...');
+          setExportMessage('YouTube Studio へ転送準備中...');
           await savePublishMedia({
             jobId,
             blob: rendered.blob,
@@ -607,15 +625,15 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
       setErrorBanner(`YouTube 公開準備エラー: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setIsExporting(false);
-      setBusyMessage('');
+      setExportMessage('');
     }
   };
 
   const handlePublishToX = async () => {
-    if (!displayedEpisode || isJobRunning) return;
+    if (!displayedEpisode || isExporting) return;
     setErrorBanner('');
     setIsExporting(true);
-    setBusyMessage('X.com 投稿データを準備中...');
+    setExportMessage('X.com 投稿データを準備中...');
     const jobId = `pub-x-${Date.now()}`;
     let savedMedia = false;
     try {
@@ -626,11 +644,11 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
       let videoSizeBytes: number | undefined;
       let fileName: string | undefined;
       if (settings.publish.xAttachVideo && hasAudioExportable) {
-        const rendered = await renderEpisodeToMp4(displayedEpisode, (msg) => setBusyMessage(msg));
+        const rendered = await renderEpisodeToMp4(displayedEpisode, (msg) => setExportMessage(msg));
         if (rendered) {
           fileName = rendered.fileName;
           videoSizeBytes = rendered.blob.size;
-          setBusyMessage('X.com へ転送準備中...');
+          setExportMessage('X.com へ転送準備中...');
           await savePublishMedia({
             jobId,
             blob: rendered.blob,
@@ -673,7 +691,7 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
       setErrorBanner(`X.com 投稿準備エラー: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setIsExporting(false);
-      setBusyMessage('');
+      setExportMessage('');
     }
   };
 
@@ -923,6 +941,18 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
           </div>
         )}
 
+        {resynthMessage && resynthMessage !== displayedEpisode?.statusDetail && (
+          <div className="status-banner" role="status">
+            <span>{resynthMessage}</span>
+          </div>
+        )}
+
+        {exportMessage && (
+          <div className="status-banner" role="status">
+            <span>{exportMessage}</span>
+          </div>
+        )}
+
         {(errorBanner || displayedEpisode?.errorMessage) && (
           <div className="status-banner is-error" role="alert">
             <span>{errorBanner || displayedEpisode?.errorMessage}</span>
@@ -1006,6 +1036,7 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
             playback={playback}
             settings={settings}
             isJobRunning={isJobRunning}
+            isResynthRunning={isResynthRunning}
             hasAudioExportable={hasAudioExportable}
             isExporting={isExporting}
             activeTurnRef={activeTurnRef}
