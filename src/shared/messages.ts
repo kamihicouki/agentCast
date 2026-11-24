@@ -26,7 +26,7 @@ export type RuntimeRequest =
   | { type: 'CAPTURE_ACTIVE_TAB' }
   | { type: 'CAPTURE_AND_GENERATE_ACTIVE_TAB' }
   | { type: 'PATROL_SOURCES'; sources?: SourceId[] }
-  | { type: 'PATROL_AND_GENERATE'; sources?: SourceId[] }
+  | { type: 'PATROL_AND_GENERATE'; sources?: SourceId[]; autoPlay?: boolean }
   | { type: 'PATROL_CUSTOM_SITE'; siteId: string; generateAfter?: boolean }
   | { type: 'LIST_TAB_GROUPS' }
   | { type: 'PATROL_TAB_GROUP'; groupId: number; generateAfter?: boolean }

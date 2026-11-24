@@ -367,6 +367,60 @@ export const DEFAULT_PUBLISH_SETTINGS: PublishSettings = {
 
 export type DurationMode = 'fixed' | 'auto';
 
+export type AppThemeId = 'braun' | 'graphite' | 'paper' | 'monochrome';
+
+export const APP_THEMES: ReadonlyArray<{
+  id: AppThemeId;
+  name: string;
+  labelJa: string;
+  description: string;
+  swatchBg: string;
+  swatchSurface: string;
+  swatchAccent: string;
+  swatchInk: string;
+}> = [
+  {
+    id: 'braun',
+    name: 'Atelier Light',
+    labelJa: 'アトリエ・ライト',
+    description: 'マットなオフホワイトとシグナルオレンジ。ディーター・ラムスのオーディオ機器に倣う標準テーマ。',
+    swatchBg: '#f3f2ee',
+    swatchSurface: '#ffffff',
+    swatchAccent: '#d94e1f',
+    swatchInk: '#191918',
+  },
+  {
+    id: 'graphite',
+    name: 'Studio Dark',
+    labelJa: 'スタジオ・ダーク',
+    description: '低反射のグラファイトと温かいアンバー。夜間や集中時のリスニング向け。',
+    swatchBg: '#141517',
+    swatchSurface: '#1d1f22',
+    swatchAccent: '#e86a2c',
+    swatchInk: '#f0eee9',
+  },
+  {
+    id: 'paper',
+    name: 'Editorial Paper',
+    labelJa: 'エディトリアル',
+    description: '生成りの紙面と深いフォレストグリーン。家具事典のような静謐な編集デザイン。',
+    swatchBg: '#f8f5ef',
+    swatchSurface: '#fffdf9',
+    swatchAccent: '#265947',
+    swatchInk: '#211e1b',
+  },
+  {
+    id: 'monochrome',
+    name: 'Pure Mono',
+    labelJa: 'モノクローム',
+    description: '装飾を完全に排した無彩色のスイス・グリッド。最も情報に集中できる構成。',
+    swatchBg: '#f5f5f5',
+    swatchSurface: '#ffffff',
+    swatchAccent: '#111111',
+    swatchInk: '#111111',
+  },
+];
+
 export const GEMINI_VOICES = ['Puck', 'Aoede', 'Kore', 'Charon', 'Fenrir', 'Leda'] as const;
 
 export const GEMINI_TTS_MODELS = [
@@ -382,6 +436,7 @@ export const OPENAI_TTS_MODELS = [
 ] as const;
 
 export interface ExtensionSettings {
+  theme: AppThemeId;
   aiMode: AIMode;
   ttsMode: TTSMode;
   geminiApiKey: string;
@@ -422,6 +477,7 @@ export interface ExtensionSettings {
 }
 
 export const DEFAULT_SETTINGS: ExtensionSettings = {
+  theme: 'braun',
   aiMode: 'gemini_api',
   ttsMode: 'gemini_tts',
   geminiApiKey: '',

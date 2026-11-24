@@ -56,9 +56,34 @@ interface PlayerPanelProps {
   onDownloadMp4: () => void;
   onCreateDemo: () => void;
   onGoToPatrol: () => void;
+  // Optional one-click broadcast unit props
+  enabledSourceCount?: number;
+  isEngineReady?: boolean;
+  busyMessage?: string;
+  onPatrolAndPlay?: () => void;
+  onGoToSettings?: () => void;
 }
 
-const COVER_VARIANTS = ['n-cover-0', 'n-cover-1', 'n-cover-2', 'n-cover-3'];
+function inferPipelineStage(
+  isJobRunning: boolean,
+  busyMessage: string,
+  episode: PodcastEpisode | null,
+  isPlaying: boolean
+): 0 | 1 | 2 | 3 {
+  if (!isJobRunning) return isPlaying ? 3 : 0;
+  const msg = `${busyMessage} ${episode?.statusDetail || ''}`;
+  if (
+    episode?.status === 'generating_script' ||
+    episode?.status === 'synthesizing_audio' ||
+    /台本|構成|音声|合成|TTS|チャプター/.test(msg)
+  ) {
+    return 2;
+  }
+  if (isPlaying && episode?.status === 'ready') {
+    return 3;
+  }
+  return 1;
+}
 
 export function PlayerPanel({
   episodes,
@@ -95,12 +120,15 @@ export function PlayerPanel({
   onDownloadMp4,
   onCreateDemo,
   onGoToPatrol,
+  enabledSourceCount,
+  isEngineReady = true,
+  busyMessage = '',
+  onPatrolAndPlay,
+  onGoToSettings,
 }: PlayerPanelProps) {
-  // Default to Now Playing when actively playing, otherwise Library is 1 tap away (or default if idle)
-  const [view, setView] = useState<'now' | 'library'>(() =>
-    playback.isPlaying ? 'now' : 'library'
-  );
+  const [subTab, setSubTab] = useState<'script' | 'library'>('script');
   const [search, setSearch] = useState('');
+  const [showExport, setShowExport] = useState(false);
   const [showResynth, setShowResynth] = useState(false);
   const [resynthTtsMode, setResynthTtsMode] = useState<TTSMode>(settings.ttsMode);
   const [resynthGeminiModel, setResynthGeminiModel] = useState<string>(
@@ -144,284 +172,284 @@ export function PlayerPanel({
     });
   }, [episodes, search, deriveEpisodeSubtitle]);
 
-  const effectiveView: 'now' | 'library' =
-    displayedEpisode && view === 'now' ? 'now' : episodes.length === 0 ? 'now' : view;
-
   const isPlayingNow = Boolean(isSelectedPlayingEpisode && playback.isPlaying);
-  const coverClass =
-    COVER_VARIANTS[
-      Math.max(0, episodes.findIndex((e) => e.id === displayedEpisode?.id)) % COVER_VARIANTS.length
-    ];
+  const currentSec = isSelectedPlayingEpisode ? playback.currentTimeSec : 0;
+  const chapterDurationSec = isSelectedPlayingEpisode
+    ? playback.durationSec || displayedChapter?.durationSec || 0
+    : displayedChapter?.durationSec || 0;
+  const progressPct =
+    chapterDurationSec > 0 ? Math.min(100, Math.max(0, (currentSec / chapterDurationSec) * 100)) : 0;
+
+  const durationLabel =
+    settings.durationMode === 'auto' ? 'おまかせ尺' : `${settings.targetDurationMin || 10}分`;
+  const pipelineStage = inferPipelineStage(isJobRunning, busyMessage, displayedEpisode, isPlayingNow);
 
   return (
-    <section className="step-section" aria-label="STEP 4 番組ライブラリと再生">
-      {/* [1] Step Header + View Switch */}
-      <div className="step-header">
-        <div>
-          <div className="step-kicker">STEP 4 / LIBRARY &amp; PLAYER</div>
-          <h2 className="step-title">番組ライブラリ・再生</h2>
-        </div>
-        <div className="segmented segmented-2" role="tablist" aria-label="表示切替">
-          <button
-            type="button"
-            className={`segment ${effectiveView === 'now' ? 'is-active' : ''}`}
-            onClick={() => setView('now')}
-          >
-            再生中
-          </button>
-          <button
-            type="button"
-            className={`segment ${effectiveView === 'library' ? 'is-active' : ''}`}
-            onClick={() => setView('library')}
-          >
-            ライブラリ ({episodes.length})
-          </button>
-        </div>
-      </div>
+    <section className="step-section" aria-label="聴く・ワンクリック番組作成">
+      {/* ==================== ONE-CLICK BROADCAST UNIT ==================== */}
+      {onPatrolAndPlay && (
+        <div className="broadcast-unit" aria-label="ワンクリック番組作成と再生">
+          {!isEngineReady && onGoToSettings && (
+            <div className="broadcast-setup-notice">
+              <span>AI・音声エンジンの初期設定が必要です</span>
+              <button
+                type="button"
+                className="btn-secondary btn-compact"
+                onClick={onGoToSettings}
+              >
+                設定を開く
+              </button>
+            </div>
+          )}
 
-      {/* Empty State */}
+          <button
+            id="btn-one-click-patrol-play"
+            type="button"
+            className="btn-broadcast"
+            disabled={isJobRunning || enabledSourceCount === 0}
+            onClick={onPatrolAndPlay}
+          >
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              {isJobRunning ? (
+                <circle
+                  cx="8"
+                  cy="8"
+                  r="5.5"
+                  stroke="currentColor"
+                  strokeWidth="1.75"
+                  strokeDasharray="22 12"
+                />
+              ) : (
+                <path d="M4.5 3.2L12.8 8L4.5 12.8V3.2Z" fill="currentColor" />
+              )}
+            </svg>
+            <span>
+              {isJobRunning
+                ? '巡回・番組を作成中…'
+                : enabledSourceCount === 0
+                  ? '巡回ソースを1つ以上有効にしてください'
+                  : '巡回して番組を作成・再生'}
+            </span>
+          </button>
+
+          <div className="broadcast-meta-row">
+            <span className="broadcast-meta-specs">
+              {typeof enabledSourceCount === 'number' ? `${enabledSourceCount} ソース` : ''}
+              {' · '}
+              {durationLabel}
+              {' · 自動再生'}
+            </span>
+            <button type="button" className="btn-ghost" onClick={onGoToPatrol}>
+              ソースを変更
+            </button>
+          </div>
+
+          {isJobRunning && (
+            <>
+              <div className="pipeline-track" aria-label="進行状況">
+                <div
+                  className={`pipeline-step ${
+                    pipelineStage === 1 ? 'is-active' : pipelineStage > 1 ? 'is-done' : ''
+                  }`}
+                >
+                  <span className="pipeline-step-num">01</span>
+                  <span>巡回</span>
+                </div>
+                <div
+                  className={`pipeline-step ${
+                    pipelineStage === 2 ? 'is-active' : pipelineStage > 2 ? 'is-done' : ''
+                  }`}
+                >
+                  <span className="pipeline-step-num">02</span>
+                  <span>番組作成</span>
+                </div>
+                <div className={`pipeline-step ${pipelineStage === 3 ? 'is-active' : ''}`}>
+                  <span className="pipeline-step-num">03</span>
+                  <span>再生</span>
+                </div>
+              </div>
+              {busyMessage && <p className="pipeline-live-msg">{busyMessage}</p>}
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ==================== EMPTY STATE ==================== */}
       {episodes.length === 0 && (
         <div className="empty-box">
-          <p>まだ番組がありません。巡回して最新ニュースから番組を作成するか、デモ番組を試聴できます。</p>
-          <div className="action-row-2" style={{ marginTop: 12 }}>
-            <button type="button" className="btn-primary" onClick={onGoToPatrol}>
-              ← STEP 2 巡回へ
-            </button>
+          <p>
+            まだ番組がありません。上のボタンで巡回から再生まで一括実行するか、デモ番組を試聴できます。
+          </p>
+          <div style={{ marginTop: 12, display: 'flex', justifyContent: 'center', gap: 8 }}>
             <button type="button" className="btn-secondary" onClick={onCreateDemo}>
               デモ番組を試聴
             </button>
+            <button type="button" className="btn-ghost" onClick={onGoToPatrol}>
+              巡回ソースを見る
+            </button>
           </div>
         </div>
       )}
 
-      {/* ==================== LIBRARY VIEW (Spotify / Apple Music style) ==================== */}
-      {episodes.length > 0 && effectiveView === 'library' && (
-        <div className="library-view">
-          <input
-            type="search"
-            className="field-input"
-            placeholder="🔍 過去の番組・トピックを検索…"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            aria-label="番組を検索"
-          />
-
-          <div className="library-list">
-            {filteredEpisodes.map((ep, idx) => {
-              const isCurrent = playback.episodeId === ep.id;
-              const isEpPlaying = isCurrent && playback.isPlaying;
-              const variant = COVER_VARIANTS[idx % COVER_VARIANTS.length];
-              const sub = deriveEpisodeSubtitle(ep);
-
-              return (
-                <article
-                  key={ep.id}
-                  className={`library-card ${isCurrent ? 'is-current' : ''}`}
-                >
-                  <button
-                    type="button"
-                    className={`library-cover ${variant}`}
-                    onClick={() => {
-                      onSelectEpisode(ep.id);
-                      if (isCurrent) {
-                        onTogglePlayPause();
-                      } else {
-                        onPlayEpisode(ep.id, 0);
-                      }
-                      setView('now');
-                    }}
-                    title={isEpPlaying ? '一時停止' : '再生'}
-                    aria-label={`${ep.title} を再生`}
-                  >
-                    {isEpPlaying ? (
-                      <div className="eq-bars" aria-hidden="true">
-                        <span className="eq-bar" />
-                        <span className="eq-bar" />
-                        <span className="eq-bar" />
-                      </div>
-                    ) : (
-                      <span>▶</span>
-                    )}
-                  </button>
-
-                  <button
-                    type="button"
-                    className="library-info"
-                    onClick={() => {
-                      onSelectEpisode(ep.id);
-                      setView('now');
-                    }}
-                  >
-                    <div className="library-meta">
-                      <span className={isCurrent ? 'is-accent' : ''}>
-                        {formatEpisodeTimestamp(ep.createdAt)}
-                      </span>
-                      <span>
-                        {ep.status === 'ready'
-                          ? formatSec(ep.totalDurationSec)
-                          : ep.statusDetail || '生成中…'}
-                      </span>
-                    </div>
-                    <h3 className="library-title">{ep.title}</h3>
-                    <p className="library-sub">{sub}</p>
-                  </button>
-
-                  <button
-                    type="button"
-                    className="btn-ghost"
-                    disabled={(isJobRunning || isResynthRunning) && ep.status !== 'ready'}
-                    onClick={() => onDeleteEpisode(ep.id)}
-                    title="この番組を削除"
-                    aria-label={`${ep.title} を削除`}
-                  >
-                    ✕
-                  </button>
-                </article>
-              );
-            })}
-            {filteredEpisodes.length === 0 && (
-              <p className="field-hint">「{search}」に一致する番組がありません。</p>
-            )}
+      {/* ==================== NOW PLAYING HARDWARE DECK ==================== */}
+      {displayedEpisode && (
+        <div className="player-deck" aria-label="再生デッキ">
+          <div className="deck-status-row">
+            <span className="deck-led-group">
+              <span className={`deck-led ${isPlayingNow ? 'is-live' : ''}`} aria-hidden="true" />
+              {isPlayingNow
+                ? 'ON AIR'
+                : displayedEpisode.status === 'ready'
+                  ? 'READY'
+                  : 'PREPARING'}
+            </span>
+            <span className="deck-timestamp">
+              {formatEpisodeTimestamp(displayedEpisode.createdAt)} ·{' '}
+              {formatSec(displayedEpisode.totalDurationSec)}
+              {displayedEpisode.ttsEngineLabel ? ` · ${displayedEpisode.ttsEngineLabel}` : ''}
+            </span>
           </div>
-        </div>
-      )}
 
-      {/* ==================== NOW PLAYING VIEW (Napster Deck + Dynamic Script) ==================== */}
-      {displayedEpisode && effectiveView === 'now' && (
-        <>
-          <div className="n-primary-card now-playing-deck">
-            <div className="np-hero">
-              <div className={`np-cover ${coverClass}`} aria-hidden="true">
-                <div className={`eq-bars ${isPlayingNow ? '' : 'is-paused'}`}>
-                  <span className="eq-bar" />
-                  <span className="eq-bar" />
-                  <span className="eq-bar" />
-                </div>
-                <span className="np-cover-label">{isPlayingNow ? 'ON AIR' : 'READY'}</span>
-              </div>
-              <div className="np-meta">
-                <div className="np-timestamp">
-                  {formatEpisodeTimestamp(displayedEpisode.createdAt)} ・{' '}
-                  {formatSec(displayedEpisode.totalDurationSec)}
-                  {displayedEpisode.ttsEngineLabel ? ` ・ ${displayedEpisode.ttsEngineLabel}` : ''}
-                </div>
-                <h3 className="np-title">{displayedEpisode.title}</h3>
-                <p className="np-subtitle">{deriveEpisodeSubtitle(displayedEpisode)}</p>
-              </div>
-            </div>
+          <div>
+            <h2 className="deck-title">{displayedEpisode.title}</h2>
+            <p className="deck-subtitle">{deriveEpisodeSubtitle(displayedEpisode)}</p>
+          </div>
 
-            {/* Scrubber & Time */}
-            {displayedChapter && (
-              <div className="np-progress-row">
-                <span className="mono-time">
-                  {formatSec(isSelectedPlayingEpisode ? playback.currentTimeSec : 0)}
-                </span>
-                <span className="np-chapter-indicator">
-                  Ch {displayedChapterIndex + 1}/{displayedEpisode.chapters.length}:{' '}
+          {displayedChapter && (
+            <div className="deck-progress-block">
+              <div className="deck-progress-rail" aria-hidden="true">
+                <div className="deck-progress-fill" style={{ width: `${progressPct}%` }} />
+              </div>
+              <div className="deck-progress-meta">
+                <span className="mono-time">{formatSec(currentSec)}</span>
+                <span className="deck-chapter-label">
+                  {displayedChapterIndex + 1}/{displayedEpisode.chapters.length} ·{' '}
                   {displayedChapter.title}
                 </span>
-                <span className="mono-time">
-                  {formatSec(
-                    isSelectedPlayingEpisode
-                      ? playback.durationSec || displayedChapter.durationSec
-                      : displayedChapter.durationSec
-                  )}
-                </span>
+                <span className="mono-time">{formatSec(chapterDurationSec)}</span>
               </div>
-            )}
-
-            {/* Transport Controls */}
-            <div className="transport-row">
-              <button
-                type="button"
-                className="btn-secondary btn-compact"
-                onClick={() => onSeekRelative(-15)}
-                title="15秒戻る"
-              >
-                -15s
-              </button>
-              <button
-                type="button"
-                className="btn-secondary btn-compact"
-                onClick={() => onSkipChapter(-1)}
-                title="前のチャプター"
-              >
-                ⏮
-              </button>
-              <button
-                id="btn-play-toggle"
-                type="button"
-                className="btn-primary btn-play-hero"
-                disabled={displayedEpisode.chapters.length === 0}
-                onClick={() => {
-                  if (isSelectedPlayingEpisode) onTogglePlayPause();
-                  else onPlayEpisode(displayedEpisode.id, displayedChapterIndex);
-                }}
-              >
-                {isPlayingNow ? '⏸ 一時停止' : '▶ 再生'}
-              </button>
-              <button
-                type="button"
-                className="btn-secondary btn-compact"
-                onClick={() => onSkipChapter(1)}
-                title="次のチャプター"
-              >
-                ⏭
-              </button>
-              <button
-                type="button"
-                className="btn-secondary btn-compact"
-                onClick={() => onSeekRelative(30)}
-                title="30秒進む"
-              >
-                +30s
-              </button>
-              <button
-                type="button"
-                className="btn-secondary btn-compact"
-                onClick={onCycleSpeed}
-                title="再生速度を切替"
-              >
-                {playback.playbackRate.toFixed(2).replace(/\.00$/, '.0')}x
-              </button>
             </div>
+          )}
 
-            {/* Export & Publish Strip */}
-            <div className="np-actions-strip">
-              <button
-                type="button"
-                className={`btn-secondary btn-compact ${showResynth ? 'is-active' : ''}`}
-                disabled={displayedEpisode.chapters.length === 0}
-                onClick={() => setShowResynth((v) => !v)}
-                title="同じ台本を使って別のTTS・モデルで音声を再作成"
-              >
-                {isResynthRunning ? '🎙 再合成中...' : '🎙 別TTSで再合成'}
-              </button>
+          {/* Tactile Transport Row */}
+          <div className="transport-row">
+            <button
+              type="button"
+              className="transport-btn"
+              onClick={() => onSeekRelative(-15)}
+              title="15秒戻る"
+            >
+              -15s
+            </button>
+            <button
+              type="button"
+              className="transport-btn"
+              onClick={() => onSkipChapter(-1)}
+              title="前のチャプター"
+              aria-label="前のチャプター"
+            >
+              ⏮
+            </button>
+            <button
+              id="btn-play-toggle"
+              type="button"
+              className={`btn-play-hero ${isPlayingNow ? 'is-playing' : ''}`}
+              disabled={displayedEpisode.chapters.length === 0}
+              onClick={() => {
+                if (isSelectedPlayingEpisode) onTogglePlayPause();
+                else onPlayEpisode(displayedEpisode.id, displayedChapterIndex);
+              }}
+            >
+              {isPlayingNow ? '一時停止' : '再生'}
+            </button>
+            <button
+              type="button"
+              className="transport-btn"
+              onClick={() => onSkipChapter(1)}
+              title="次のチャプター"
+              aria-label="次のチャプター"
+            >
+              ⏭
+            </button>
+            <button
+              type="button"
+              className="transport-btn"
+              onClick={() => onSeekRelative(30)}
+              title="30秒進む"
+            >
+              +30s
+            </button>
+            <button
+              type="button"
+              className="transport-btn"
+              onClick={onCycleSpeed}
+              title="再生速度を切替"
+            >
+              {playback.playbackRate.toFixed(2).replace(/\.00$/, '.0')}x
+            </button>
+          </div>
+
+          {/* Quiet Secondary Controls (Progressive Disclosure) */}
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 6,
+              paddingTop: 8,
+              borderTop: '1px solid var(--line-subtle)',
+            }}
+          >
+            <button
+              type="button"
+              className={`btn-secondary btn-compact ${showResynth ? 'is-active' : ''}`}
+              disabled={displayedEpisode.chapters.length === 0}
+              onClick={() => {
+                setShowResynth((v) => !v);
+                setShowExport(false);
+              }}
+              title="同じ台本を使って別のTTS・モデルで音声を再作成"
+            >
+              {isResynthRunning ? '再合成中…' : '別TTSで再合成'}
+            </button>
+
+            <button
+              type="button"
+              className={`btn-secondary btn-compact ${showExport ? 'is-active' : ''}`}
+              onClick={() => {
+                setShowExport((v) => !v);
+                setShowResynth(false);
+              }}
+            >
+              {showExport ? '書き出しを閉じる' : '書き出し・公開'}
+            </button>
+          </div>
+
+          {/* Export / Publish Drawer */}
+          {showExport && (
+            <div className="output-grid" aria-label="書き出し・公開">
               <button
                 type="button"
                 className="btn-secondary btn-compact"
                 disabled={isExporting || !hasAudioExportable}
                 onClick={onDownloadAudio}
-                title="音声ファイル (WAV) を保存"
               >
-                💾 音声
+                音声保存 (WAV)
               </button>
               <button
                 type="button"
                 className="btn-secondary btn-compact"
                 disabled={isExporting}
                 onClick={onDownloadHtml}
-                title="再生可能なHTMLとして保存"
               >
-                📦 HTML
+                ポータブル HTML
               </button>
               <button
                 type="button"
                 className="btn-secondary btn-compact"
                 onClick={onCopyMarkdown}
-                title="台本をMarkdownでコピー"
               >
-                📋 台本
+                台本コピー (MD)
               </button>
               <button
                 type="button"
@@ -429,23 +457,7 @@ export function PlayerPanel({
                 disabled={isExporting}
                 onClick={onShareNative}
               >
-                🔗 共有
-              </button>
-              <button
-                type="button"
-                className="btn-secondary btn-compact"
-                disabled={isExporting || displayedEpisode.status !== 'ready'}
-                onClick={onPublishYouTube}
-              >
-                📺 YouTube公開
-              </button>
-              <button
-                type="button"
-                className="btn-secondary btn-compact"
-                disabled={isExporting || displayedEpisode.status !== 'ready'}
-                onClick={onPublishX}
-              >
-                𝕏 X投稿
+                共有
               </button>
               <button
                 type="button"
@@ -453,181 +465,224 @@ export function PlayerPanel({
                 disabled={isExporting || !hasAudioExportable}
                 onClick={onDownloadMp4}
               >
-                🎬 MP4
+                動画保存 (MP4)
+              </button>
+              <button
+                type="button"
+                className="btn-secondary btn-compact"
+                disabled={isExporting || displayedEpisode.status !== 'ready'}
+                onClick={onPublishYouTube}
+              >
+                YouTube 公開
+              </button>
+              <button
+                type="button"
+                className="btn-secondary btn-compact"
+                disabled={isExporting || displayedEpisode.status !== 'ready'}
+                onClick={onPublishX}
+                style={{ gridColumn: '1 / -1' }}
+              >
+                X に投稿
               </button>
             </div>
+          )}
 
-            {showResynth && (
-              <div
-                className="n-card"
-                style={{ marginTop: 10, padding: '10px 12px' }}
-                aria-label="同じ台本で別TTS・モデル再合成"
-              >
-                <div className="card-head-row" style={{ marginBottom: 6 }}>
-                  <strong>🎙 同じ台本で別モデル / TTS 再作成</strong>
-                  <button
-                    type="button"
-                    className="btn-ghost"
-                    onClick={() => setShowResynth(false)}
-                    aria-label="再合成パネルを閉じる"
-                  >
-                    ✕
-                  </button>
-                </div>
+          {/* Resynthesize Drawer */}
+          {showResynth && (
+            <div
+              className="n-card"
+              style={{ padding: 12, background: 'var(--bg-surface-subtle)' }}
+              aria-label="同じ台本で別TTS・モデル再合成"
+            >
+              <div className="card-head-row" style={{ marginBottom: 8 }}>
+                <strong style={{ fontSize: 12 }}>同じ台本で別モデル / TTS 再作成</strong>
+                <button
+                  type="button"
+                  className="btn-ghost"
+                  onClick={() => setShowResynth(false)}
+                  aria-label="再合成パネルを閉じる"
+                >
+                  ✕
+                </button>
+              </div>
 
-                <div className="field-row">
-                  <label className="field-label" htmlFor="resynth-tts-mode">
-                    音声合成エンジン (TTS)
-                  </label>
-                  <select
-                    id="resynth-tts-mode"
-                    className="field-select"
-                    value={resynthTtsMode}
-                    onChange={(e) => setResynthTtsMode(e.target.value as TTSMode)}
-                  >
-                    <option value="gemini_tts">Gemini Multi-Speaker TTS（自然な2人掛け合い）</option>
-                    <option value="openai_tts">OpenAI TTS（話者別MP3合成）</option>
-                    <option value="macos_speech">macOS Web Speech（無料・ローカル日本語）</option>
-                  </select>
-                </div>
+              <div className="field-row">
+                <label className="field-label" htmlFor="resynth-tts-mode">
+                  音声合成エンジン (TTS)
+                </label>
+                <select
+                  id="resynth-tts-mode"
+                  className="field-select"
+                  value={resynthTtsMode}
+                  onChange={(e) => setResynthTtsMode(e.target.value as TTSMode)}
+                >
+                  <option value="gemini_tts">Gemini Multi-Speaker TTS（自然な2人掛け合い）</option>
+                  <option value="openai_tts">OpenAI TTS（話者別MP3合成）</option>
+                  <option value="macos_speech">macOS Web Speech（無料・ローカル日本語）</option>
+                </select>
+              </div>
 
-                {resynthTtsMode === 'gemini_tts' && (
-                  <>
-                    <div className="field-row">
-                      <label className="field-label" htmlFor="resynth-gemini-model">
-                        Gemini TTS モデル
-                      </label>
-                      <select
-                        id="resynth-gemini-model"
-                        className="field-select"
-                        value={resynthGeminiModel}
-                        onChange={(e) => setResynthGeminiModel(e.target.value)}
-                      >
-                        {GEMINI_TTS_MODELS.map((m) => (
-                          <option key={m.id} value={m.id}>
-                            {m.label}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                    <div className="grid-2">
-                      <div className="field-row">
-                        <label className="field-label" htmlFor="resynth-host-a-voice">
-                          Host A 声色
-                        </label>
-                        <select
-                          id="resynth-host-a-voice"
-                          className="field-select"
-                          value={resynthHostAVoice}
-                          onChange={(e) => setResynthHostAVoice(e.target.value)}
-                        >
-                          {GEMINI_VOICES.map((v) => (
-                            <option key={v} value={v}>
-                              {v}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                      <div className="field-row">
-                        <label className="field-label" htmlFor="resynth-host-b-voice">
-                          Host B 声色
-                        </label>
-                        <select
-                          id="resynth-host-b-voice"
-                          className="field-select"
-                          value={resynthHostBVoice}
-                          onChange={(e) => setResynthHostBVoice(e.target.value)}
-                        >
-                          {GEMINI_VOICES.map((v) => (
-                            <option key={v} value={v}>
-                              {v}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                    </div>
-                  </>
-                )}
-
-                {resynthTtsMode === 'openai_tts' && (
+              {resynthTtsMode === 'gemini_tts' && (
+                <>
                   <div className="field-row">
-                    <label className="field-label" htmlFor="resynth-openai-model">
-                      OpenAI TTS モデル
+                    <label className="field-label" htmlFor="resynth-gemini-model">
+                      Gemini TTS モデル
                     </label>
                     <select
-                      id="resynth-openai-model"
+                      id="resynth-gemini-model"
                       className="field-select"
-                      value={resynthOpenAiModel}
-                      onChange={(e) => setResynthOpenAiModel(e.target.value)}
+                      value={resynthGeminiModel}
+                      onChange={(e) => setResynthGeminiModel(e.target.value)}
                     >
-                      {OPENAI_TTS_MODELS.map((m) => (
+                      {GEMINI_TTS_MODELS.map((m) => (
                         <option key={m.id} value={m.id}>
                           {m.label}
                         </option>
                       ))}
                     </select>
                   </div>
-                )}
-
-                <div className="toggle-row" style={{ marginTop: 6 }}>
-                  <span>元の音声を残して別エピソードとして作成</span>
-                  <input
-                    type="checkbox"
-                    checked={resynthDuplicate}
-                    onChange={(e) => setResynthDuplicate(e.target.checked)}
-                  />
-                </div>
-
-                {missingResynthKey ? (
-                  <div style={{ marginTop: 8 }}>
-                    <p className="field-hint" style={{ marginBottom: 6 }}>
-                      {resynthTtsMode === 'openai_tts'
-                        ? 'OpenAI API Key が未設定です。ワンクリック連携でキーを設定できます。'
-                        : 'Gemini API Key が未設定です。ワンクリック連携でキーを設定できます。'}
-                    </p>
-                    <button
-                      type="button"
-                      className="btn-primary"
-                      style={{ width: '100%' }}
-                      onClick={() =>
-                        void (resynthTtsMode === 'openai_tts'
-                          ? onStartOpenAiKeySetup()
-                          : onStartGeminiKeySetup())
-                      }
-                    >
-                      {resynthTtsMode === 'openai_tts'
-                        ? '⚡ OpenAI でワンクリック連携'
-                        : '⚡ AI Studio でワンクリック連携'}
-                    </button>
+                  <div className="grid-2">
+                    <div className="field-row">
+                      <label className="field-label" htmlFor="resynth-host-a-voice">
+                        Host A 声色
+                      </label>
+                      <select
+                        id="resynth-host-a-voice"
+                        className="field-select"
+                        value={resynthHostAVoice}
+                        onChange={(e) => setResynthHostAVoice(e.target.value)}
+                      >
+                        {GEMINI_VOICES.map((v) => (
+                          <option key={v} value={v}>
+                            {v}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="field-row">
+                      <label className="field-label" htmlFor="resynth-host-b-voice">
+                        Host B 声色
+                      </label>
+                      <select
+                        id="resynth-host-b-voice"
+                        className="field-select"
+                        value={resynthHostBVoice}
+                        onChange={(e) => setResynthHostBVoice(e.target.value)}
+                      >
+                        {GEMINI_VOICES.map((v) => (
+                          <option key={v} value={v}>
+                            {v}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
                   </div>
-                ) : (
+                </>
+              )}
+
+              {resynthTtsMode === 'openai_tts' && (
+                <div className="field-row">
+                  <label className="field-label" htmlFor="resynth-openai-model">
+                    OpenAI TTS モデル
+                  </label>
+                  <select
+                    id="resynth-openai-model"
+                    className="field-select"
+                    value={resynthOpenAiModel}
+                    onChange={(e) => setResynthOpenAiModel(e.target.value)}
+                  >
+                    {OPENAI_TTS_MODELS.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              <div className="toggle-row" style={{ marginTop: 4 }}>
+                <span>元の音声を残して別エピソードとして作成</span>
+                <input
+                  type="checkbox"
+                  checked={resynthDuplicate}
+                  onChange={(e) => setResynthDuplicate(e.target.checked)}
+                />
+              </div>
+
+              {missingResynthKey ? (
+                <div style={{ marginTop: 8 }}>
+                  <p className="field-hint" style={{ marginBottom: 6 }}>
+                    {resynthTtsMode === 'openai_tts'
+                      ? 'OpenAI API Key が未設定です。'
+                      : 'Gemini API Key が未設定です。'}
+                  </p>
                   <button
                     type="button"
                     className="btn-primary"
-                    style={{ width: '100%', marginTop: 8 }}
-                    disabled={isResynthRunning}
-                    onClick={() => {
-                      setShowResynth(false);
-                      void onResynthesizeEpisode({
-                        episodeId: displayedEpisode.id,
-                        ttsMode: resynthTtsMode,
-                        geminiTtsModel: resynthGeminiModel,
-                        openaiTtsModel: resynthOpenAiModel,
-                        hostAVoice: resynthHostAVoice,
-                        hostBVoice: resynthHostBVoice,
-                        mode: resynthDuplicate ? 'duplicate' : 'overwrite',
-                      });
-                    }}
+                    style={{ width: '100%' }}
+                    onClick={() =>
+                      void (resynthTtsMode === 'openai_tts'
+                        ? onStartOpenAiKeySetup()
+                        : onStartGeminiKeySetup())
+                    }
                   >
-                    {isResynthRunning ? '🎙 音声を再合成中...' : '🎙 この台本で音声を再作成'}
+                    {resynthTtsMode === 'openai_tts'
+                      ? 'OpenAI でワンクリック連携'
+                      : 'AI Studio でワンクリック連携'}
                   </button>
-                )}
-              </div>
-            )}
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  className="btn-primary"
+                  style={{ width: '100%', marginTop: 8 }}
+                  disabled={isResynthRunning}
+                  onClick={() => {
+                    setShowResynth(false);
+                    void onResynthesizeEpisode({
+                      episodeId: displayedEpisode.id,
+                      ttsMode: resynthTtsMode,
+                      geminiTtsModel: resynthGeminiModel,
+                      openaiTtsModel: resynthOpenAiModel,
+                      hostAVoice: resynthHostAVoice,
+                      hostBVoice: resynthHostBVoice,
+                      mode: resynthDuplicate ? 'duplicate' : 'overwrite',
+                    });
+                  }}
+                >
+                  {isResynthRunning ? '音声を再合成中…' : 'この台本で音声を再作成'}
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ==================== EDITORIAL SUB-TABS: SCRIPT / LIBRARY ==================== */}
+      {episodes.length > 0 && (
+        <>
+          <div className="sub-tabs" role="tablist" aria-label="表示切替">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={subTab === 'script'}
+              className={`sub-tab ${subTab === 'script' ? 'is-active' : ''}`}
+              onClick={() => setSubTab('script')}
+            >
+              台本・チャプター
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={subTab === 'library'}
+              className={`sub-tab ${subTab === 'library' ? 'is-active' : ''}`}
+              onClick={() => setSubTab('library')}
+            >
+              番組一覧 ({episodes.length})
+            </button>
           </div>
 
-          {/* Chapter Pills & Dynamic Lyrics-style Script */}
-          {displayedEpisode.chapters.length > 0 && (
+          {subTab === 'script' && displayedEpisode && displayedEpisode.chapters.length > 0 && (
             <div className="n-card script-panel">
               <div className="chapter-pills" role="tablist" aria-label="チャプター一覧">
                 {displayedEpisode.chapters.map((ch, idx) => (
@@ -658,7 +713,8 @@ export function PlayerPanel({
                           rel="noreferrer"
                           className="source-chip"
                         >
-                          [{SOURCE_META[ref.source]?.shortLabel || ref.source}] {ref.title.slice(0, 32)}
+                          {SOURCE_META[ref.source]?.shortLabel || ref.source} ·{' '}
+                          {ref.title.slice(0, 32)}
                         </a>
                       ))}
                     </div>
@@ -684,6 +740,98 @@ export function PlayerPanel({
                   </div>
                 </>
               )}
+            </div>
+          )}
+
+          {subTab === 'library' && (
+            <div className="library-view">
+              <input
+                type="search"
+                className="field-input"
+                placeholder="過去の番組やトピックを検索…"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                aria-label="番組を検索"
+              />
+
+              <div className="library-list">
+                {filteredEpisodes.map((ep) => {
+                  const isCurrent = playback.episodeId === ep.id;
+                  const isEpPlaying = isCurrent && playback.isPlaying;
+                  const sub = deriveEpisodeSubtitle(ep);
+
+                  return (
+                    <article
+                      key={ep.id}
+                      className={`library-card ${isCurrent ? 'is-current' : ''}`}
+                    >
+                      <button
+                        type="button"
+                        className="library-play-btn"
+                        onClick={() => {
+                          onSelectEpisode(ep.id);
+                          if (isCurrent) {
+                            onTogglePlayPause();
+                          } else {
+                            onPlayEpisode(ep.id, 0);
+                          }
+                          setSubTab('script');
+                        }}
+                        title={isEpPlaying ? '一時停止' : '再生'}
+                        aria-label={`${ep.title} を再生`}
+                      >
+                        {isEpPlaying ? (
+                          <div className="eq-bars" aria-hidden="true">
+                            <span className="eq-bar" />
+                            <span className="eq-bar" />
+                            <span className="eq-bar" />
+                          </div>
+                        ) : (
+                          <span>▶</span>
+                        )}
+                      </button>
+
+                      <button
+                        type="button"
+                        className="library-info"
+                        onClick={() => {
+                          onSelectEpisode(ep.id);
+                          setSubTab('script');
+                        }}
+                      >
+                        <div className="library-meta">
+                          <span className={isCurrent ? 'is-accent' : ''}>
+                            {formatEpisodeTimestamp(ep.createdAt)}
+                          </span>
+                          <span>
+                            {ep.status === 'ready'
+                              ? formatSec(ep.totalDurationSec)
+                              : ep.statusDetail || '生成中…'}
+                          </span>
+                        </div>
+                        <h3 className="library-title">{ep.title}</h3>
+                        <p className="library-sub">{sub}</p>
+                      </button>
+
+                      <button
+                        type="button"
+                        className="btn-ghost"
+                        disabled={(isJobRunning || isResynthRunning) && ep.status !== 'ready'}
+                        onClick={() => onDeleteEpisode(ep.id)}
+                        title="この番組を削除"
+                        aria-label={`${ep.title} を削除`}
+                      >
+                        ✕
+                      </button>
+                    </article>
+                  );
+                })}
+                {filteredEpisodes.length === 0 && (
+                  <p className="field-hint" style={{ padding: 12 }}>
+                    「{search}」に一致する番組がありません。
+                  </p>
+                )}
+              </div>
             </div>
           )}
         </>

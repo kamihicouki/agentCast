@@ -1,8 +1,10 @@
 import React from 'react';
 import {
+  APP_THEMES,
   GEMINI_TTS_MODELS,
   GEMINI_VOICES,
   OPENAI_TTS_MODELS,
+  type AppThemeId,
   type BuildMeta,
   type DurationMode,
   type ExtensionSettings,
@@ -51,7 +53,6 @@ export function SettingsPanel({
   onVerifyOpenAiKey,
   onOrganizeGeminiNotebook,
   onCreateDemo,
-  onGoToPatrol,
   onRevokeConsent,
 }: SettingsPanelProps) {
   const isAiReady =
@@ -74,32 +75,59 @@ export function SettingsPanel({
 
   const durationMode: DurationMode = settings.durationMode || 'fixed';
   const durationMin = Math.max(3, Math.min(30, settings.targetDurationMin || 10));
+  const currentTheme: AppThemeId = settings.theme || 'braun';
+  const activeThemeMeta = APP_THEMES.find((t) => t.id === currentTheme) || APP_THEMES[0];
 
   return (
-    <section className="step-section" aria-label="STEP 1 初期設定とデフォルト">
-      {/* [1] Step Header */}
-      <div className="step-header">
-        <div>
-          <div className="step-kicker">STEP 1 / DEFAULT SETUP</div>
-          <h2 className="step-title">AI・音声と番組のデフォルト設定</h2>
+    <section className="step-section" aria-label="設定">
+      {/* Theme Selection */}
+      <div className="n-card">
+        <div className="card-head-row">
+          <strong>外観テーマ</strong>
+          <span className="mono-pill">{activeThemeMeta.name}</span>
         </div>
-        <button type="button" className="btn-ghost is-accent" onClick={onGoToPatrol}>
-          次へ：巡回 →
-        </button>
+        <p className="field-hint">{activeThemeMeta.description}</p>
+        <div className="theme-grid" role="radiogroup" aria-label="外観テーマ選択">
+          {APP_THEMES.map((t) => {
+            const isActive = currentTheme === t.id;
+            return (
+              <button
+                key={t.id}
+                type="button"
+                role="radio"
+                aria-checked={isActive}
+                className={`theme-card ${isActive ? 'is-active' : ''}`}
+                onClick={() => void onPatchSettings({ theme: t.id })}
+              >
+                <div
+                  className="theme-preview-bar"
+                  style={{ background: t.swatchBg }}
+                  aria-hidden="true"
+                >
+                  <span className="theme-preview-chip" style={{ background: t.swatchSurface }} />
+                  <span className="theme-preview-chip" style={{ background: t.swatchInk, opacity: 0.7 }} />
+                  <span className="theme-preview-dot" style={{ background: t.swatchAccent }} />
+                </div>
+                <span className="theme-card-name">{t.name}</span>
+                <span className="theme-card-ja">{t.labelJa}</span>
+              </button>
+            );
+          })}
+        </div>
       </div>
 
-      {/* [2] Primary Action Card: AI & Voice Setup */}
+      {/* AI & Voice Engine */}
       <div className="n-primary-card">
         <div className="card-head-row">
-          <strong>⚡ AI 台本 &amp; 音声エンジン</strong>
+          <strong>AI 台本・音声エンジン</strong>
           <span className={`pill-badge ${isEngineReady ? 'is-sage' : 'is-amber'}`}>
             {statusLabel}
           </span>
         </div>
 
-        <div className="field-row" style={{ marginTop: 8 }}>
+        <div className="field-row" style={{ marginTop: 10 }}>
           <label className="field-label" htmlFor="select-ai-mode">
-            台本生成エンジン（契約プランに合わせて選択）
+            台本生成エンジン
           </label>
           <select
             id="select-ai-mode"
@@ -122,7 +150,7 @@ export function SettingsPanel({
             {typeof __AGENTCAST_TARGET__ === 'undefined' || __AGENTCAST_TARGET__ === 'main' ? (
               <>
                 <option value="web_chatgpt">
-                  ChatGPT Plus/Pro：Webセッション連携（APIキー不要・追加課金なし）
+                  ChatGPT Plus/Pro：Webセッション連携（APIキー不要）
                 </option>
                 <option value="web_gemini">
                   Google AI Pro/Ultra：Gemini Webセッション連携（APIキー不要）
@@ -132,10 +160,12 @@ export function SettingsPanel({
             <option value="openai_api">OpenAI API 直結（GPT-4o / gpt-4o-mini）</option>
           </select>
         </div>
+
         {onRevokeConsent && (
           <p className="field-hint">
-            <a href={PRIVACY_POLICY_URL} target="_blank" rel="noreferrer">プライバシーポリシー</a>
-            {' '}
+            <a href={PRIVACY_POLICY_URL} target="_blank" rel="noreferrer">
+              プライバシーポリシー
+            </a>{' '}
             <button type="button" className="btn-ghost" onClick={onRevokeConsent}>
               データ取り扱いの同意を取り消す
             </button>
@@ -146,11 +176,9 @@ export function SettingsPanel({
           settings.aiMode === 'web_gemini' &&
           onOrganizeGeminiNotebook && (
             <div className="field-row">
-              <label className="field-label">
-                Gemini ノートブック整理（agentcast）
-              </label>
+              <label className="field-label">Gemini ノートブック整理（agentcast）</label>
               <p className="field-hint" style={{ marginTop: 2, marginBottom: 6 }}>
-                新規作成した台本は自動で「agentcast」ノートブックに追加されます。過去の台本も一括で整理できます。
+                新規作成した台本は自動で「agentcast」ノートブックに追加されます。
               </p>
               <button
                 type="button"
@@ -160,14 +188,14 @@ export function SettingsPanel({
               >
                 {isOrganizingGeminiNotebook
                   ? '過去の台本を整理中…'
-                  : '📓 過去の台本を「agentcast」ノートブックに整理'}
+                  : '過去の台本を「agentcast」に整理'}
               </button>
               {geminiNotebookStatus && (
                 <p
                   className="field-hint"
                   style={{
                     marginTop: 6,
-                    color: geminiNotebookStatus.ok ? 'var(--accent-sage)' : 'var(--danger-soft)',
+                    color: geminiNotebookStatus.ok ? 'var(--signal-ok)' : 'var(--signal-danger)',
                   }}
                 >
                   {geminiNotebookStatus.text}
@@ -188,9 +216,9 @@ export function SettingsPanel({
               void onPatchSettings({ ttsMode: e.target.value as ExtensionSettings['ttsMode'] })
             }
           >
-            <option value="gemini_tts">Gemini Multi-Speaker TTS（自然な2人掛け合い音声）</option>
+            <option value="gemini_tts">Gemini Multi-Speaker TTS（2人掛け合い音声）</option>
             <option value="openai_tts">OpenAI TTS（話者別MP3合成）</option>
-            <option value="macos_speech">macOS Web Speech（無料・ローカル日本語音声）</option>
+            <option value="macos_speech">macOS Web Speech（無料・ローカル日本語）</option>
           </select>
         </div>
 
@@ -253,7 +281,7 @@ export function SettingsPanel({
                 className="btn-primary"
                 onClick={() => void onStartGeminiKeySetup()}
               >
-                ⚡ AI Studio でワンクリック連携
+                AI Studio で自動連携
               </button>
               <button
                 type="button"
@@ -264,16 +292,11 @@ export function SettingsPanel({
                 {isVerifyingKey ? '検証中…' : '接続テスト'}
               </button>
             </div>
-            {!settings.geminiApiKey.trim() && (
-              <p className="field-hint" style={{ marginTop: 6 }}>
-                上のボタンを押すと Google AI Studio が開き、キー作成またはコピーで agentCast に自動連携されます。
-              </p>
-            )}
             {keyVerifyStatus && (
               <p
                 className="field-hint"
                 style={{
-                  color: keyVerifyStatus.ok ? 'var(--accent-sage)' : 'var(--danger-soft)',
+                  color: keyVerifyStatus.ok ? 'var(--signal-ok)' : 'var(--signal-danger)',
                 }}
               >
                 {keyVerifyStatus.text}
@@ -301,7 +324,7 @@ export function SettingsPanel({
                 className="btn-primary"
                 onClick={() => void onStartOpenAiKeySetup()}
               >
-                ⚡ OpenAI でワンクリック連携
+                OpenAI で自動連携
               </button>
               <button
                 type="button"
@@ -312,16 +335,11 @@ export function SettingsPanel({
                 {isVerifyingOpenAiKey ? '検証中…' : '接続テスト'}
               </button>
             </div>
-            {!settings.openaiApiKey.trim() && (
-              <p className="field-hint" style={{ marginTop: 6 }}>
-                上のボタンを押すと OpenAI API Keys が開き、キーを作成すると自動で agentCast に連携されます（※ChatGPT Plusとは別枠のAPIクレジットが必要です）。
-              </p>
-            )}
             {openAiKeyVerifyStatus && (
               <p
                 className="field-hint"
                 style={{
-                  color: openAiKeyVerifyStatus.ok ? 'var(--accent-sage)' : 'var(--danger-soft)',
+                  color: openAiKeyVerifyStatus.ok ? 'var(--signal-ok)' : 'var(--signal-danger)',
                 }}
               >
                 {openAiKeyVerifyStatus.text}
@@ -331,10 +349,10 @@ export function SettingsPanel({
         )}
       </div>
 
-      {/* [3] Default Program Length (Slider + Fixed/Auto) */}
+      {/* Default Program Length */}
       <div className="n-card">
         <div className="card-head-row">
-          <strong>番組の長さ（デフォルト）</strong>
+          <strong>番組の長さ</strong>
           <div className="segmented segmented-2">
             <button
               type="button"
@@ -354,10 +372,10 @@ export function SettingsPanel({
         </div>
 
         {durationMode === 'fixed' ? (
-          <div className="slider-box" style={{ marginTop: 8 }}>
+          <div className="slider-box" style={{ marginTop: 10 }}>
             <div className="slider-meta-row">
               <span className="field-hint" style={{ margin: 0 }}>
-                スライドで任意設定（STEP 3 でもその場変更可）
+                ワンクリック番組作成時の標準尺
               </span>
               <span className="duration-readout">{durationMin}分</span>
             </div>
@@ -386,129 +404,131 @@ export function SettingsPanel({
             </div>
           </div>
         ) : (
-          <p className="field-hint" style={{ marginTop: 6 }}>
-            ✨ 収集した素材の情報量に応じて、AI が無理なく聴き切れる自然な長さ（約 5〜20 分）に自動調整します。
+          <p className="field-hint" style={{ marginTop: 8 }}>
+            収集した素材の情報量に応じて、AI が自然な長さ（約 5〜20 分）に自動調整します。
           </p>
         )}
       </div>
 
       {/* Personality, Focus & Schedule */}
-      <div className="n-card">
-        <h3 className="card-sub-title">パーソナリティ・関心・鮮度・スケジュール</h3>
-        <div className="grid-2">
-          <div className="field-row">
-            <label className="field-label">Host A 名前</label>
-            <input
-              className="field-input"
-              value={settings.hostAName}
-              onChange={(e) => void onPatchSettings({ hostAName: e.target.value })}
-            />
-          </div>
-          <div className="field-row">
-            <label className="field-label">Host B 名前</label>
-            <input
-              className="field-input"
-              value={settings.hostBName}
-              onChange={(e) => void onPatchSettings({ hostBName: e.target.value })}
-            />
-          </div>
-        </div>
-        {settings.ttsMode === 'gemini_tts' && (
+      <details className="n-card extract-details">
+        <summary>パーソナリティ・関心・鮮度・スケジュール</summary>
+        <div style={{ marginTop: 12 }}>
           <div className="grid-2">
             <div className="field-row">
-              <label className="field-label">Host A 声色</label>
-              <select
-                className="field-select"
-                value={settings.hostAVoice}
-                onChange={(e) => void onPatchSettings({ hostAVoice: e.target.value })}
-              >
-                {GEMINI_VOICES.map((v) => (
-                  <option key={v} value={v}>
-                    {v}
-                  </option>
-                ))}
-              </select>
+              <label className="field-label">Host A 名前</label>
+              <input
+                className="field-input"
+                value={settings.hostAName}
+                onChange={(e) => void onPatchSettings({ hostAName: e.target.value })}
+              />
             </div>
             <div className="field-row">
-              <label className="field-label">Host B 声色</label>
-              <select
-                className="field-select"
-                value={settings.hostBVoice}
-                onChange={(e) => void onPatchSettings({ hostBVoice: e.target.value })}
-              >
-                {GEMINI_VOICES.map((v) => (
-                  <option key={v} value={v}>
-                    {v}
-                  </option>
-                ))}
-              </select>
+              <label className="field-label">Host B 名前</label>
+              <input
+                className="field-input"
+                value={settings.hostBName}
+                onChange={(e) => void onPatchSettings({ hostBName: e.target.value })}
+              />
             </div>
           </div>
-        )}
-        <div className="field-row">
-          <label className="field-label">重視する関心トピック（動画の見る/見ない判定にも使用）</label>
-          <input
-            className="field-input"
-            value={settings.focusTopics}
-            onChange={(e) => void onPatchSettings({ focusTopics: e.target.value })}
-          />
-        </div>
-        <div className="field-row">
-          <label className="field-label">情報鮮度・新着ウィンドウ（時間）</label>
-          <input
-            type="number"
-            min={6}
-            max={720}
-            className="field-input"
-            value={settings.radarWindowHours}
-            onChange={(e) =>
-              void onPatchSettings({
-                radarWindowHours: Math.max(6, Number(e.target.value) || 72),
-              })
-            }
-          />
-          <p className="field-hint">
-            この期間より古い記事や、過去7日間の番組と重複する話題は自動でスキップします（続報・アップデートは採用）。
-          </p>
-        </div>
-        <div className="toggle-row">
-          <div>
-            <div>閲覧中の自動受動ストック（既定OFF・オプトイン）</div>
-            <p className="field-hint">
-              ON にした場合のみ、許可済みサイトの閲覧時に本文候補の自動抽出を行います。OFF の間は手動操作まで読み取りを開始しません。
-            </p>
-          </div>
-          <input
-            type="checkbox"
-            checked={settings.passiveCaptureEnabled}
-            onChange={(e) => void onPatchSettings({ passiveCaptureEnabled: e.target.checked })}
-          />
-        </div>
-        <div className="toggle-row">
-          <span>毎日決まった時刻に自動巡回＆番組作成</span>
-          <input
-            type="checkbox"
-            checked={settings.autoScheduleEnabled}
-            onChange={(e) => void onPatchSettings({ autoScheduleEnabled: e.target.checked })}
-          />
-        </div>
-        {settings.autoScheduleEnabled && (
+          {settings.ttsMode === 'gemini_tts' && (
+            <div className="grid-2">
+              <div className="field-row">
+                <label className="field-label">Host A 声色</label>
+                <select
+                  className="field-select"
+                  value={settings.hostAVoice}
+                  onChange={(e) => void onPatchSettings({ hostAVoice: e.target.value })}
+                >
+                  {GEMINI_VOICES.map((v) => (
+                    <option key={v} value={v}>
+                      {v}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="field-row">
+                <label className="field-label">Host B 声色</label>
+                <select
+                  className="field-select"
+                  value={settings.hostBVoice}
+                  onChange={(e) => void onPatchSettings({ hostBVoice: e.target.value })}
+                >
+                  {GEMINI_VOICES.map((v) => (
+                    <option key={v} value={v}>
+                      {v}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          )}
           <div className="field-row">
-            <label className="field-label">自動生成時刻</label>
+            <label className="field-label">重視する関心トピック</label>
             <input
-              type="time"
               className="field-input"
-              value={settings.autoScheduleTime}
-              onChange={(e) => void onPatchSettings({ autoScheduleTime: e.target.value })}
+              value={settings.focusTopics}
+              onChange={(e) => void onPatchSettings({ focusTopics: e.target.value })}
             />
           </div>
-        )}
-      </div>
+          <div className="field-row">
+            <label className="field-label">情報鮮度ウィンドウ（時間）</label>
+            <input
+              type="number"
+              min={6}
+              max={720}
+              className="field-input"
+              value={settings.radarWindowHours}
+              onChange={(e) =>
+                void onPatchSettings({
+                  radarWindowHours: Math.max(6, Number(e.target.value) || 72),
+                })
+              }
+            />
+            <p className="field-hint">
+              この期間より古い記事や直近7日間の重複トピックは自動でスキップします。
+            </p>
+          </div>
+          <div className="toggle-row">
+            <div>
+              <div>閲覧中の自動受動ストック（既定OFF）</div>
+              <p className="field-hint">
+                ON にした場合のみ、許可済みサイトの閲覧時に本文候補を自動抽出します。
+              </p>
+            </div>
+            <input
+              type="checkbox"
+              checked={settings.passiveCaptureEnabled}
+              onChange={(e) => void onPatchSettings({ passiveCaptureEnabled: e.target.checked })}
+            />
+          </div>
+          <div className="toggle-row">
+            <span>毎日決まった時刻に自動巡回・番組作成</span>
+            <input
+              type="checkbox"
+              checked={settings.autoScheduleEnabled}
+              onChange={(e) => void onPatchSettings({ autoScheduleEnabled: e.target.checked })}
+            />
+          </div>
+          {settings.autoScheduleEnabled && (
+            <div className="field-row">
+              <label className="field-label">自動生成時刻</label>
+              <input
+                type="time"
+                className="field-input"
+                value={settings.autoScheduleTime}
+                onChange={(e) => void onPatchSettings({ autoScheduleTime: e.target.value })}
+              />
+            </div>
+          )}
+        </div>
+      </details>
 
       {/* Publish Settings */}
       <details className="n-card extract-details">
-        <summary>公開先設定（YouTube / X.com）</summary>
-        <div style={{ marginTop: 10 }}>
+        <summary>公開先設定（YouTube / X）</summary>
+        <div style={{ marginTop: 12 }}>
           <div className="field-row">
             <label className="field-label">YouTube チャンネルID または URL</label>
             <input
@@ -542,7 +562,7 @@ export function SettingsPanel({
             </select>
           </div>
           <div className="field-row">
-            <label className="field-label">X.com 投稿先ハンドル</label>
+            <label className="field-label">X 投稿先ハンドル</label>
             <input
               className="field-input"
               placeholder="@your_handle"
@@ -573,10 +593,14 @@ export function SettingsPanel({
       <div className="n-card">
         <div className="card-head-row">
           <span className="field-hint" style={{ margin: 0 }}>
-            ビルド: <span className="mono-inline">{currentBuild?.buildId || 'local'}</span>
+            Build: <span className="mono-inline">{currentBuild?.buildId || 'local'}</span>
           </span>
           <div style={{ display: 'flex', gap: 6 }}>
-            <button type="button" className="btn-secondary btn-compact" onClick={() => void onCreateDemo()}>
+            <button
+              type="button"
+              className="btn-secondary btn-compact"
+              onClick={() => void onCreateDemo()}
+            >
               デモ試聴
             </button>
             {pendingBuild && (

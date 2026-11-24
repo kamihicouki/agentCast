@@ -30,7 +30,6 @@ export function QueuePanel({
   showToast,
   setErrorBanner,
 }: QueuePanelProps) {
-  // Per-run overrides initialized from Step 1 defaults
   const [runDurationMin, setRunDurationMin] = useState<number>(settings.targetDurationMin || 10);
   const [runDurationMode, setRunDurationMode] = useState<DurationMode>(
     settings.durationMode || 'fixed'
@@ -95,61 +94,44 @@ export function QueuePanel({
   };
 
   return (
-    <section className="step-section" aria-label="STEP 3 キューと番組作成">
-      {/* [1] Step Header */}
-      <div className="step-header">
-        <div>
-          <div className="step-kicker">STEP 3 / QUEUE &amp; COMPOSE</div>
-          <h2 className="step-title">集めた素材を調整して番組を作成</h2>
-        </div>
-        <span className="mono-pill">
-          {selectedItems.length}/{queue.length} 件選択
-        </span>
-      </div>
-
-      {/* Patrol -> Queue flow bar */}
-      <div className="n-card flow-bar">
-        <div className="flow-bar-chips">
-          <span className="flow-bar-label">巡回ベース:</span>
-          {sourceBreakdown.length > 0 ? (
-            sourceBreakdown.map(([label, count]) => (
+    <section className="step-section" aria-label="素材キュー">
+      {/* Source Breakdown Strip */}
+      {sourceBreakdown.length > 0 && (
+        <div className="n-card flow-bar">
+          <div className="flow-bar-chips">
+            <span className="flow-bar-label">内訳</span>
+            {sourceBreakdown.map(([label, count]) => (
               <span key={label} className="source-count-chip">
                 {label} {count}
               </span>
-            ))
-          ) : (
-            <span className="field-hint" style={{ margin: 0 }}>
-              素材なし
-            </span>
-          )}
+            ))}
+          </div>
+          <span className="mono-pill">
+            {selectedItems.length}/{queue.length}
+          </span>
         </div>
-        <button type="button" className="btn-ghost is-accent" onClick={onGoToPatrol}>
-          ソース変更
-        </button>
-      </div>
+      )}
 
-      {/* [2] Primary Action Card: Tune Length & Cook Episode */}
+      {/* Compose Card */}
       <div className="n-primary-card">
         <div className="card-head-row">
-          <strong>🎙 番組を作成（この回だけの調整OK）</strong>
+          <strong>キューの素材から番組を作成</strong>
           <span className="duration-readout">
             {runDurationMode === 'auto' ? 'おまかせ' : `${runDurationMin}分`}
           </span>
         </div>
 
-        <div className="slider-box">
+        <div className="slider-box" style={{ marginTop: 10 }}>
           <div className="slider-meta-row">
             <span className="field-hint" style={{ margin: 0 }}>
-              今回の長さ（STEP 1 デフォルトから即変更可）
+              今回の長さ
             </span>
             <button
               type="button"
               className="btn-ghost is-accent"
-              onClick={() =>
-                setRunDurationMode((m) => (m === 'auto' ? 'fixed' : 'auto'))
-              }
+              onClick={() => setRunDurationMode((m) => (m === 'auto' ? 'fixed' : 'auto'))}
             >
-              {runDurationMode === 'auto' ? '分数を指定する' : 'おまかせにする'}
+              {runDurationMode === 'auto' ? '分数を指定' : 'おまかせにする'}
             </button>
           </div>
           {runDurationMode === 'fixed' ? (
@@ -179,7 +161,7 @@ export function QueuePanel({
             </>
           ) : (
             <p className="field-hint" style={{ marginTop: 4 }}>
-              ✨ 選択した {selectedItems.length} 件の情報量に合わせて AI が自然な尺に自動調整します。
+              選択した {selectedItems.length} 件の情報量に合わせて AI が長さを自動調整します。
             </p>
           )}
         </div>
@@ -193,11 +175,11 @@ export function QueuePanel({
             disabled={selectedItems.length === 0 || isJobRunning}
             onClick={() => void handleGenerate()}
           >
-            🎙 選択した {selectedItems.length} 件から番組を作成する
+            選択した {selectedItems.length} 件から番組を作成・再生
           </button>
 
-          {queue.length > 0 && (
-            confirmClear ? (
+          {queue.length > 0 &&
+            (confirmClear ? (
               <div className="clear-confirm-row">
                 <button
                   type="button"
@@ -208,7 +190,7 @@ export function QueuePanel({
                     void onClearQueue();
                   }}
                 >
-                  本当に全 {queue.length} 件をクリアする
+                  全 {queue.length} 件を削除
                 </button>
                 <button
                   type="button"
@@ -227,30 +209,23 @@ export function QueuePanel({
                 disabled={isJobRunning}
                 onClick={() => setConfirmClear(true)}
               >
-                🗑 キューを全クリア（{queue.length}件）
+                キューを空にする（{queue.length}件）
               </button>
-            )
-          )}
+            ))}
         </div>
       </div>
 
-      {/* [3] Queue Material List */}
-      <div className="list-head-row">
-        <span className="section-label">キュー内の素材（個別にON/OFF・除外）</span>
-      </div>
-
+      {/* Material List */}
       {queue.length === 0 ? (
         <div className="empty-box">
-          <p>
-            未読キューは空です。<strong>STEP 2「巡回」</strong>でソース巡回やタブ取り込みを実行してください。
-          </p>
+          <p>未読キューは空です。ソースを巡回するか、開いているタブから取り込んでください。</p>
           <button
             type="button"
             className="btn-secondary"
             style={{ marginTop: 10 }}
             onClick={onGoToPatrol}
           >
-            ← STEP 2 巡回へ移動
+            ソース一覧へ
           </button>
         </div>
       ) : (
@@ -269,13 +244,14 @@ export function QueuePanel({
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div className="queue-meta">
                       <span className="queue-source-tag">
-                        [{SOURCE_META[item.source]?.shortLabel || item.source}] {item.author}
+                        {SOURCE_META[item.source]?.shortLabel || item.source} · {item.author}
                       </span>
                       <button
                         type="button"
                         className="btn-ghost"
                         onClick={() => void onRemoveItem(item.id)}
                         title="キューから削除"
+                        aria-label={`${item.title} を削除`}
                       >
                         ✕
                       </button>
