@@ -137,4 +137,20 @@ describe('Web session DOM submit & state reader (Gemini / ChatGPT)', () => {
     expect(clicked).toBe(true);
     expect(document.querySelector('.ql-editor')?.textContent).toBe('テストプロンプト本文');
   });
+
+  it('detects complete JSON even when leading prose contains curly braces', () => {
+    document.body.innerHTML = `
+      <main>
+        <model-response>
+          <message-content class="model-response-text">
+            フォーマット {v1} で生成しました:\n${SAMPLE_SCRIPT_JSON}
+          </message-content>
+        </model-response>
+      </main>
+    `;
+
+    const state = runDomReadWebSessionState('gemini', 0, '');
+    expect(state.ok).toBe(true);
+    expect(state.hasCompleteJson).toBe(true);
+  });
 });

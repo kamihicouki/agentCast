@@ -7,6 +7,7 @@ import type {
   PodcastEpisode,
 } from '../shared/types';
 import { SOURCE_META } from '../shared/types';
+import { parseJsonObjectWithRepair } from './json-repair';
 
 export interface RawGeneratedScript {
   title: string;
@@ -225,7 +226,7 @@ ${bodySnippet}`;
 5. 英語の記事やリリースノート（Changelog等）が含まれる場合は、**必ず自然な日本語で噛み砕いて解説**してください。バージョン番号やスラッシュコマンド（例: v2.33.0 → バージョン2.33.0、/swarm → スウォームコマンド、SSH → エスエスエイチ）は \`spokenText\` で滑らかに発音できる表記にしてください。
 6. ${durationGuidance}全体で ${targetChapters} のトピックチャプター（先頭の短いオープニング挨拶を含む）に編成し、各チャプターは ${turnsPerChapter} のテンポ良い会話にしてください。
 7. 音声合成（TTS）で読み上げた際に不自然にならないよう、URL文字列や絵文字はセリフに含めず、難読英単語・略語（例: Vite→ヴィート、PR→プルリクエスト、LLM→エルエルエム）を自然に読める日本語表記を \`spokenText\` に入れてください（通常の字幕表示用は \`text\`）。
-8. 出力は**必ず以下のJSONスキーマのみ**（Markdownのコードブロック装飾や前置き文なし）で返してください。
+8. 出力は**必ず以下のJSONスキーマのみ**（Markdownのコードブロック装飾や前置き文なし）で返してください。文字列値の中で半角ダブルクォート（"）を使う場合は必ず \\" でエスケープするか、日本語の鉤括弧「」を使用してください。
 
 {
   "title": "内容が一目で分かる固有の番組タイトル（例：LINE Dev Community移行＆Gemini 4 Neon解説）",
@@ -255,72 +256,95 @@ export function parseGeneratedScriptJson(
   sourceItems: FeedItem[],
   settings: ExtensionSettings
 ): { title: string; subtitle: string; chapters: EpisodeChapter[] } {
-  // Strip markdown ```json fences or surrounding prose if returned by Web LLM
-  let jsonCandidate = rawText.trim();
-  const fenceMatch = /```(?:json)?\s*([\s\S]*?)```/i.exec(jsonCandidate);
-  if (fenceMatch) {
-    jsonCandidate = fenceMatch[1].trim();
-  } else {
-    const firstBrace = jsonCandidate.indexOf('{');
-    const lastBrace = jsonCandidate.lastIndexOf('}');
-    if (firstBrace >= 0 && lastBrace > firstBrace) {
-      jsonCandidate = jsonCandidate.slice(firstBrace, lastBrace + 1);
+  let parsed: RawGeneratedScript;
+  try {
+    const res = parseJsonObjectWithRepair<RawGeneratedScript & Record<string, unknown>>(rawText, {
+      preferKeys: ['chapters'],
+    });
+    if (res.repaired) {
+      console.warn('[agentCast] Repaired malformed/truncated LLM script JSON before parsing.');
     }
+    parsed = res.value;
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new Error(`AIから返された台本JSONの解析に失敗しました（再試行してください）: ${detail}`);
   }
 
-  const parsed = JSON.parse(jsonCandidate) as RawGeneratedScript;
   if (!parsed || !Array.isArray(parsed.chapters) || parsed.chapters.length === 0) {
     throw new Error('生成された台本JSONに chapters が含まれていません。');
   }
 
   const itemMap = new Map(sourceItems.map((i) => [i.id, i]));
 
-  const chapters: EpisodeChapter[] = parsed.chapters.map((ch, idx) => {
-    const refs: ChapterSourceRef[] = (ch.sourceIds || [])
-      .map((id) => itemMap.get(id))
-      .filter((item): item is FeedItem => Boolean(item))
-      .map((item) => ({
-        id: item.id,
-        source: item.source,
-        title: item.title,
-        url: item.url,
-        author: item.author,
-      }));
+  const rawChapters: EpisodeChapter[] = parsed.chapters
+    .filter((ch): ch is RawGeneratedScript['chapters'][number] => Boolean(ch && typeof ch === 'object'))
+    .map((ch, idx) => {
+      const refs: ChapterSourceRef[] = (Array.isArray(ch.sourceIds) ? ch.sourceIds : [])
+        .map((id) => itemMap.get(String(id)))
+        .filter((item): item is FeedItem => Boolean(item))
+        .map((item) => ({
+          id: item.id,
+          source: item.source,
+          title: item.title,
+          url: item.url,
+          author: item.author,
+        }));
 
-    const turns: DialogueTurn[] = (ch.turns || [])
-      .filter((t) => t && typeof t.text === 'string' && t.text.trim().length > 0)
-      .map((t, turnIdx) => {
-        const speaker = t.speaker === 'HostB' ? 'HostB' : 'HostA';
-        return {
-          id: `ch${idx}-t${turnIdx}`,
-          speaker,
-          speakerName: speaker === 'HostA' ? settings.hostAName : settings.hostBName,
-          text: t.text.trim(),
-          spokenText: (t.spokenText || t.text).trim(),
-        };
-      });
+      const turns: DialogueTurn[] = (Array.isArray(ch.turns) ? ch.turns : [])
+        .filter((t) => t && typeof t.text === 'string' && t.text.trim().length > 0)
+        .map((t, turnIdx) => {
+          const speaker = t.speaker === 'HostB' ? 'HostB' : 'HostA';
+          return {
+            id: `ch${idx}-t${turnIdx}`,
+            speaker,
+            speakerName: speaker === 'HostA' ? settings.hostAName : settings.hostBName,
+            text: t.text.trim(),
+            spokenText: (typeof t.spokenText === 'string' && t.spokenText.trim()
+              ? t.spokenText
+              : t.text
+            ).trim(),
+          };
+        });
 
-    // Estimate ~5.5 chars/sec in Japanese speech until actual TTS audio replaces durationSec
-    const charCount = turns.reduce((acc, t) => acc + t.text.length, 0);
-    const estDurationSec = Math.max(8, Math.round(charCount / 5.5));
+      // Estimate ~5.5 chars/sec in Japanese speech until actual TTS audio replaces durationSec
+      const charCount = turns.reduce((acc, t) => acc + t.text.length, 0);
+      const estDurationSec = Math.max(8, Math.round(charCount / 5.5));
 
-    return {
+      return {
+        id: `chapter-${idx}`,
+        index: idx,
+        title: (typeof ch.title === 'string' && ch.title.trim()) || `トピック ${idx + 1}`,
+        summary: typeof ch.summary === 'string' ? ch.summary : '',
+        sourceItems: refs,
+        turns,
+        durationSec: estDurationSec,
+        hasAudioBlob: false,
+      };
+    });
+
+  // Drop empty chapters (e.g. a trailing chapter truncated before any turns were written)
+  const nonEmptyChapters = rawChapters.filter((ch) => ch.turns.length > 0);
+  const chapters: EpisodeChapter[] = (nonEmptyChapters.length > 0 ? nonEmptyChapters : rawChapters).map(
+    (ch, idx) => ({
+      ...ch,
       id: `chapter-${idx}`,
       index: idx,
-      title: ch.title || `トピック ${idx + 1}`,
-      summary: ch.summary || '',
-      sourceItems: refs,
-      turns,
-      durationSec: estDurationSec,
-      hasAudioBlob: false,
-    };
-  });
+      turns: ch.turns.map((t, turnIdx) => ({
+        ...t,
+        id: `ch${idx}-t${turnIdx}`,
+      })),
+    })
+  );
+
+  if (chapters.length === 0) {
+    throw new Error('生成された台本JSONに有効なチャプターが含まれていません。');
+  }
 
   const topicTitles = chapters
     .map((c) => c.title.trim())
     .filter((t) => t && !/^(オープニング|導入|エンディング|まとめ)[:：]?$/i.test(t));
 
-  const rawSubtitle = (parsed.subtitle || '').trim();
+  const rawSubtitle = (typeof parsed.subtitle === 'string' ? parsed.subtitle : '').trim();
   const isGenericSubtitle =
     !rawSubtitle ||
     rawSubtitle.length < 10 ||
@@ -332,7 +356,10 @@ export function parseGeneratedScriptJson(
       : topicTitles.slice(0, 3).join(' / ') || `${sourceItems.length}件の新着トピックから編成`;
 
   return {
-    title: parsed.title || topicTitles[0] || 'agentCast パーソナルダイジェスト',
+    title:
+      (typeof parsed.title === 'string' && parsed.title.trim()) ||
+      topicTitles[0] ||
+      'agentCast パーソナルダイジェスト',
     subtitle: derivedSubtitle,
     chapters,
   };

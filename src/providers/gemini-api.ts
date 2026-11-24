@@ -13,6 +13,23 @@ import {
 
 const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
+function extractGeminiResponseText(data: unknown): string {
+  const parts = (
+    data as {
+      candidates?: Array<{
+        content?: { parts?: Array<{ text?: string; thought?: boolean }> };
+      }>;
+    }
+  )?.candidates?.[0]?.content?.parts;
+  if (!Array.isArray(parts) || parts.length === 0) return '';
+  const nonThought = parts
+    .filter((p) => !p?.thought && typeof p?.text === 'string')
+    .map((p) => p.text || '')
+    .join('');
+  if (nonThought.trim()) return nonThought;
+  return parts.map((p) => p?.text || '').join('');
+}
+
 export async function generateScriptWithGemini(
   items: FeedItem[],
   settings: ExtensionSettings,
@@ -51,10 +68,7 @@ export async function generateScriptWithGemini(
   }
 
   const data = await response.json();
-  const textOut: string =
-    data?.candidates?.[0]?.content?.parts
-      ?.map((p: { text?: string }) => p.text || '')
-      .join('') || '';
+  const textOut = extractGeminiResponseText(data);
 
   if (!textOut) {
     throw new Error('Gemini APIから空のレスポンスが返されました。');
@@ -90,8 +104,7 @@ export async function generateTextWithGemini(
     throw new Error(`Gemini APIエラー (${response.status}): ${errBody.slice(0, 200)}`);
   }
   const data = await response.json();
-  const textOut: string =
-    data?.candidates?.[0]?.content?.parts?.map((p: { text?: string }) => p.text || '').join('') || '';
+  const textOut = extractGeminiResponseText(data);
   if (!textOut) throw new Error('Gemini APIから空のレスポンスが返されました。');
   return textOut;
 }

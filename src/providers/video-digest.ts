@@ -1,4 +1,5 @@
 import type { DigestVerdict, ExtensionSettings, VideoDigest } from '../shared/types';
+import { parseJsonObjectWithRepair } from './json-repair';
 import {
   extractYouTubeVideoId,
   formatDurationSec,
@@ -101,12 +102,10 @@ export function buildVideoDigestPrompt(
 }
 
 function extractJsonObject(text: string): Record<string, unknown> | null {
-  const cleaned = text.replace(/```(?:json)?/gi, '');
-  const start = cleaned.indexOf('{');
-  const end = cleaned.lastIndexOf('}');
-  if (start < 0 || end <= start) return null;
   try {
-    return JSON.parse(cleaned.slice(start, end + 1));
+    return parseJsonObjectWithRepair(text, {
+      preferKeys: ['oneLiner', 'summary', 'verdict', 'keyPoints'],
+    }).value;
   } catch {
     return null;
   }

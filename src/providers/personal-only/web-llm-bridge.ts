@@ -296,37 +296,51 @@ export function runDomReadWebSessionState(
       if (res) return res;
     }
 
-    // 2. Scan for a balanced top-level JSON object starting from the first '{'
-    const firstBrace = raw.indexOf('{');
-    if (firstBrace < 0) return { complete: false, hasScriptKeys: false };
+    // 2. Scan for balanced top-level JSON objects (don't stop at a non-JSON '{' in leading prose)
+    let searchFrom = 0;
+    let attempts = 0;
+    while (attempts < 8) {
+      const startBrace = raw.indexOf('{', searchFrom);
+      if (startBrace < 0) break;
+      attempts++;
 
-    let depth = 0;
-    let inString = false;
-    let escaped = false;
-    for (let i = firstBrace; i < raw.length; i++) {
-      const ch = raw[i];
-      if (inString) {
-        if (escaped) {
-          escaped = false;
-        } else if (ch === '\\') {
-          escaped = true;
-        } else if (ch === '"') {
-          inString = false;
+      let depth = 0;
+      let inString = false;
+      let escaped = false;
+      let matchedEnd = -1;
+      for (let i = startBrace; i < raw.length; i++) {
+        const ch = raw[i];
+        if (inString) {
+          if (escaped) {
+            escaped = false;
+          } else if (ch === '\\') {
+            escaped = true;
+          } else if (ch === '"') {
+            inString = false;
+          }
+          continue;
         }
-        continue;
+        if (ch === '"') {
+          inString = true;
+        } else if (ch === '{') {
+          depth++;
+        } else if (ch === '}') {
+          depth--;
+          if (depth === 0) {
+            matchedEnd = i;
+            break;
+          }
+        }
       }
-      if (ch === '"') {
-        inString = true;
-      } else if (ch === '{') {
-        depth++;
-      } else if (ch === '}') {
-        depth--;
-        if (depth === 0) {
-          const slice = raw.slice(firstBrace, i + 1);
-          const res = tryParseObject(slice);
-          if (res) return res;
-          break;
-        }
+
+      if (matchedEnd > startBrace) {
+        const slice = raw.slice(startBrace, matchedEnd + 1);
+        const res = tryParseObject(slice);
+        if (res) return res;
+        searchFrom = matchedEnd + 1;
+      } else {
+        // Outer '{' is still unclosed (streaming/truncated); do not scan inner '{' objects
+        break;
       }
     }
 
@@ -446,11 +460,11 @@ export function runDomReadWebSessionState(
     const info = analyzeJson(txt);
     let score = 1;
     if (info.complete && info.hasScriptKeys) {
-      score = 400 + Math.min(txt.length, 50000) / 100000;
+      score = 400 + Math.min(txt.length, 500000) / 1000000;
     } else if (info.complete) {
-      score = 300 + Math.min(txt.length, 50000) / 100000;
+      score = 300 + Math.min(txt.length, 500000) / 1000000;
     } else if (txt.includes('{') && txt.includes('"')) {
-      score = 200 + Math.min(txt.length, 50000) / 100000;
+      score = 200 + Math.min(txt.length, 500000) / 1000000;
     } else {
       score = 100;
     }
@@ -480,6 +494,8 @@ export function runDomReadWebSessionState(
       'button[mattooltip*="停止"]',
       'button[mattooltip*="Stop" i]',
       'button[data-test-id*="stop"]',
+      'button.send-button.stop',
+      '.stop-button',
       '.stop-icon',
     ];
     for (const sel of stopSelectors) {
@@ -495,14 +511,16 @@ export function runDomReadWebSessionState(
         if (!isVisible(btn)) continue;
         const icon = btn.querySelector('mat-icon, .mat-icon, .google-symbols');
         const iconTxt = (icon?.textContent || '').trim().toLowerCase();
-        if (iconTxt === 'stop' || iconTxt === 'stop_circle') {
+        if (iconTxt === 'stop' || iconTxt === 'stop_circle' || iconTxt === 'square') {
           isGenerating = true;
           break;
         }
       }
     }
     if (!isGenerating && latestResponseContainer) {
-      const busy = latestResponseContainer.querySelector('[aria-busy="true"]');
+      const busy = latestResponseContainer.querySelector(
+        '[aria-busy="true"], .streaming, bard-avatar[aria-busy="true"]'
+      );
       if (busy && isVisible(busy)) {
         isGenerating = true;
       }
@@ -2018,10 +2036,13 @@ export async function runPromptViaWebSession(
         break;
       }
 
-      // Fallback when response is not strict JSON (e.g. minor syntax quirk) but has stabilized after generation stopped
-      if (!pollState.isGenerating && txt.includes('{') && txt.includes('}') && stablePolls >= 4) {
-        responseText = txt;
-        break;
+      // Fallback when response is not strict JSON (e.g. minor syntax quirk) but has stabilized after generation stopped.
+      // Require completion UI (3 polls / ~4.5s) or a longer quiet period (12 polls / ~18s) to avoid cutting off large streaming scripts mid-pause.
+      if (!pollState.isGenerating && txt.includes('{') && txt.includes('}')) {
+        if ((pollState.hasCompletionUi && stablePolls >= 3) || stablePolls >= 12) {
+          responseText = txt;
+          break;
+        }
       }
     }
 
