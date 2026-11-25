@@ -142,6 +142,55 @@ describe('OpenAI & Gemini one-click key setup helpers', () => {
     dom.window.close();
   });
 
+  it('validates and auto-captures new AQ. format Gemini API keys', async () => {
+    const { verifyGeminiApiKey, injectAiStudioKeyHelper } = await import(
+      '../src/providers/personal-only/aistudio-key-helper'
+    );
+
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const aqKey = `AQ.Ab8RN6${'TestKey1234'.repeat(4)}`;
+    const okRes = await verifyGeminiApiKey(aqKey);
+    expect(okRes.valid).toBe(true);
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://generativelanguage.googleapis.com/v1beta/models?pageSize=5',
+      expect.objectContaining({
+        headers: { 'x-goog-api-key': aqKey },
+        redirect: 'error',
+      })
+    );
+
+    const shortAqRes = await verifyGeminiApiKey('AQ.Ab8RN6short');
+    expect(shortAqRes.valid).toBe(false);
+    expect(shortAqRes.message).toContain('AQ.');
+
+    const dom = new JSDOM(
+      `<!doctype html><html><body><span>AQ.Ab8RN6...</span></body></html>`,
+      { url: 'https://aistudio.google.com/apikey' }
+    );
+    const sendMessage = vi.fn((_msg, cb) => cb?.({ ok: true }));
+    vi.stubGlobal('window', dom.window);
+    vi.stubGlobal('document', dom.window.document);
+    vi.stubGlobal('MutationObserver', dom.window.MutationObserver);
+    vi.stubGlobal('chrome', { runtime: { sendMessage } });
+
+    injectAiStudioKeyHelper();
+    expect(sendMessage).not.toHaveBeenCalled();
+
+    const span = dom.window.document.createElement('span');
+    span.textContent = aqKey;
+    dom.window.document.body.appendChild(span);
+
+    await new Promise((r) => setTimeout(r, 20));
+    expect(sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'GEMINI_KEY_CAPTURED', apiKey: aqKey }),
+      expect.any(Function)
+    );
+
+    dom.window.close();
+  });
+
   it('forwards configured openaiTtsModel in synthesizeChapterWithOpenAITts', async () => {
     const { synthesizeChapterWithOpenAITts } = await import('../src/providers/openai-api');
     const { DEFAULT_SETTINGS } = await import('../src/shared/types');

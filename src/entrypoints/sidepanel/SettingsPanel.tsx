@@ -274,7 +274,7 @@ export function SettingsPanel({
               id="input-gemini-key"
               type="password"
               className="field-input"
-              placeholder="AIza..."
+              placeholder="AIza... または AQ...."
               value={settings.geminiApiKey}
               onChange={(e) => void onPatchSettings({ geminiApiKey: e.target.value })}
             />

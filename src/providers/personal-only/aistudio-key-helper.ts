@@ -1,22 +1,23 @@
 /**
  * Semi-automated Gemini API key onboarding helper for Google AI Pro / Ultra users.
  * Opens https://aistudio.google.com/apikey, guides the user to click "Create API key" (never bypassing
- * sign-in or Terms of Service consent), detects newly generated or revealed AIzaSy... keys on screen
- * or via copy button, and lets the user send it into agentCast with 1 click.
+ * sign-in or Terms of Service consent), detects newly generated or revealed AIzaSy... / AQ.... keys
+ * on screen or via copy button, and lets the user send it into agentCast with 1 click.
  */
 
 import { requireDataConsent } from '../../shared/data-consent';
 
-const GEMINI_KEY_REGEX = /\b(AIza[0-9A-Za-z_-]{35})\b/;
+const GEMINI_KEY_EXACT_REGEX = /^(?:AIza[0-9A-Za-z_-]{35}|AQ\.[0-9A-Za-z_-]{30,})$/;
 
 export async function verifyGeminiApiKey(
   apiKey: string
 ): Promise<{ valid: boolean; message: string }> {
   const trimmed = apiKey.trim();
-  if (!GEMINI_KEY_REGEX.test(trimmed)) {
+  if (!GEMINI_KEY_EXACT_REGEX.test(trimmed)) {
     return {
       valid: false,
-      message: 'APIキーの形式が正しくありません（AIza... で始まる39文字のキーを確認してください）。',
+      message:
+        'APIキーの形式が正しくありません（AIza... または AQ.... で始まる Gemini API キーを確認してください）。',
     };
   }
 
@@ -59,7 +60,7 @@ export function injectAiStudioKeyHelper(): void {
   if (win.__agentCastKeyHelperActive__) return;
   win.__agentCastKeyHelperActive__ = true;
 
-  const KEY_RE = /\b(AIza[0-9A-Za-z_-]{35})\b/;
+  const KEY_RE = /\b(AIza[0-9A-Za-z_-]{35}|AQ\.[0-9A-Za-z_-]{30,})\b/;
   let detectedKey = '';
   let alreadySent = false;
   let sending = false;
@@ -197,16 +198,18 @@ export function injectAiStudioKeyHelper(): void {
   const scanForKey = () => {
     if (alreadySent || sending) return;
 
-    // 1. Check input fields, code blocks, dialogs, and visible text nodes for full AIzaSy... key
+    // 1. Check input fields, code blocks, dialogs, and visible text nodes for full AIzaSy... / AQ.... key
     const candidates: string[] = [];
     for (const input of document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(
       'input, textarea'
     )) {
-      if (input.value && input.value.includes('AIza')) candidates.push(input.value);
+      if (input.value && (input.value.includes('AIza') || input.value.includes('AQ.'))) {
+        candidates.push(input.value);
+      }
     }
     for (const el of document.querySelectorAll('code, pre, [role="dialog"], .apikey-text, span')) {
       const txt = el.textContent || '';
-      if (txt.includes('AIza') && txt.length < 300) {
+      if ((txt.includes('AIza') || txt.includes('AQ.')) && txt.length < 300) {
         candidates.push(txt);
       }
     }
