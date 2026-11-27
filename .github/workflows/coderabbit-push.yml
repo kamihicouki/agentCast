@@ -1,0 +1,66 @@
+name: CodeRabbit プッシュレビュー
+
+on:
+  push:
+    branches: ['**']
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    if: github.event.deleted == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: レビュー範囲を決定
+        id: range
+        env:
+          BEFORE: ${{ github.event.before }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        shell: bash
+        run: |
+          base="$BEFORE"
+          if [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
+            # 新規ブランチでは既定ブランチとの分岐点からレビューする。
+            base=$(git merge-base HEAD "refs/remotes/origin/$DEFAULT_BRANCH")
+          elif ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            # 強制プッシュで参照から外れた更新前のコミットを取得する。
+            git fetch --no-tags origin "$base"
+          fi
+          if git diff --quiet "$base" HEAD; then
+            echo "変更されたファイルはありません。"
+            exit 0
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+
+      - name: CodeRabbit CLI をインストール
+        if: steps.range.outputs.base != ''
+        env:
+          CODERABBIT_VERSION: '0.9.7'
+        shell: bash
+        run: |
+          export CODERABBIT_INSTALL_DIR="$RUNNER_TEMP/coderabbit"
+          curl -fsSL https://cli.coderabbit.ai/install.sh -o "$RUNNER_TEMP/coderabbit-install.sh"
+          sh "$RUNNER_TEMP/coderabbit-install.sh" </dev/null
+          echo "$CODERABBIT_INSTALL_DIR" >> "$GITHUB_PATH"
+
+      - name: プッシュされた差分をレビュー
+        if: steps.range.outputs.base != ''
+        env:
+          CODERABBIT_API_KEY: ${{ secrets.CODERABBIT_API_KEY }}
+          CODERABBIT_REGION: ${{ vars.CODERABBIT_REGION || 'us' }}
+          REVIEW_BASE: ${{ steps.range.outputs.base }}
+        shell: bash
+        run: |
+          if [[ -z "$CODERABBIT_API_KEY" ]]; then
+            echo "::error::GitHub Actions に CODERABBIT_API_KEY シークレットを設定してください。"
+            exit 1
+          fi
+          coderabbit review --agent --committed --region "$CODERABBIT_REGION" \
+            --api-key "$CODERABBIT_API_KEY" --base-commit "$REVIEW_BASE"
