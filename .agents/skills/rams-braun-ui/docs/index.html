@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rams-braun-ui — braun-era design system as an agent skill</title>
+<meta name="description" content="A Braun-era Dieter Rams design system, quantified into tokens and hard rules, packaged as an Agent Skill for Claude and Claude Code.">
+<meta name="color-scheme" content="light dark">
+<meta property="og:title" content="rams-braun-ui">
+<meta property="og:description" content="A Braun-era Dieter Rams design system, packaged as an Agent Skill.">
+<meta property="og:image" content="https://yangyue1974.github.io/rams-braun-ui/cover.svg">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='2' fill='%23F2EFE9'/><rect x='4' y='4' width='8' height='8' rx='1' fill='%23E8501E'/></svg>">
+<style>
+:root {
+  --chassis-white:#F2EFE9; --chassis-warm:#E9E5DC; --panel-grey:#D6D3CC;
+  --line-grey:#BDBAB2; --text-secondary:#6E6C66; --charcoal:#221F1A;
+  --on-accent:#FFFFFF;
+  --accent:#E8501E;
+  --radius:4px; --gap-in:8px; --gap-in-lg:12px; --gap-zone:28px;
+  --ease:cubic-bezier(0,0,.2,1); --t:150ms;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --chassis-white:#232220; --chassis-warm:#2C2B28; --panel-grey:#413F3B;
+    --line-grey:#413F3B; --text-secondary:#8F8C85; --charcoal:#E9E5DC;
+    --on-accent:#FFFFFF;
+  }
+}
+* { box-sizing:border-box; }
+html { -webkit-text-size-adjust:100%; }
+body {
+  margin:0;
+  background:var(--chassis-white); color:var(--charcoal);
+  font-family:"Neue Haas Grotesk","Helvetica Now Text",Helvetica,Inter,Arial,sans-serif;
+  font-size:15px; line-height:1.5; letter-spacing:.01em;
+  font-variant-numeric:tabular-nums;
+}
+.page { max-width:760px; margin:0 auto; padding:64px 32px 96px; }
+@media (max-width:600px) { .page { padding:40px 20px 64px; } }
+
+h1,h2,h3,nav,button,label,th,.ui { text-transform:lowercase; }
+h1 { font-size:32px; font-weight:500; line-height:1.2; letter-spacing:.01em; margin:0; }
+h2 {
+  font-size:13px; font-weight:500; line-height:1.2; letter-spacing:.03em;
+  color:var(--text-secondary); margin:0 0 var(--gap-in-lg);
+}
+p { margin:0; max-width:68ch; }
+a { color:var(--charcoal); text-decoration:underline; text-underline-offset:2px; }
+
+section { margin-top:56px; }
+.stack { display:flex; flex-direction:column; gap:var(--gap-in-lg); }
+.stack-tight { display:flex; flex-direction:column; gap:var(--gap-in); }
+.row { display:flex; flex-wrap:wrap; gap:var(--gap-in-lg); align-items:center; }
+.small { font-size:13px; letter-spacing:.03em; }
+.sec { color:var(--text-secondary); }
+
+/* header */
+header .sub { margin-top:var(--gap-in-lg); font-size:15px; color:var(--text-secondary); }
+nav { margin-top:var(--gap-zone); display:flex; gap:24px; font-size:13px; letter-spacing:.03em; }
+
+/* spec table */
+table { width:100%; border-collapse:collapse; }
+th, td { text-align:left; padding:12px 0; border-bottom:1px solid var(--line-grey); font-size:13px; letter-spacing:.03em; }
+th { color:var(--text-secondary); font-weight:500; }
+thead th { border-bottom:1px solid var(--line-grey); }
+td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+table.spec tr td:first-child { color:var(--text-secondary); }
+table.spec tr td:last-child { text-align:right; }
+table.spec tr:first-child td { border-top:1px solid var(--line-grey); }
+
+/* swatches */
+.swatches { display:grid; grid-template-columns:repeat(3,1fr); gap:var(--gap-in-lg); }
+@media (max-width:600px) { .swatches { grid-template-columns:repeat(2,1fr); } }
+.sw i { display:block; height:72px; border-radius:var(--radius); border:1px solid var(--line-grey); }
+.sw b { display:block; font-weight:400; font-size:13px; letter-spacing:.03em; margin-top:var(--gap-in); }
+.sw span { display:block; font-size:13px; letter-spacing:.03em; color:var(--text-secondary); }
+.accents { display:flex; flex-wrap:wrap; gap:var(--gap-in-lg); }
+.accents div { display:flex; align-items:center; gap:var(--gap-in); font-size:13px; letter-spacing:.03em; color:var(--text-secondary); }
+.accents i { width:16px; height:16px; border-radius:var(--radius); display:block; }
+
+/* panel */
+.panel {
+  background:var(--chassis-warm); border:1px solid var(--line-grey);
+  border-radius:var(--radius); padding:24px;
+}
+
+/* buttons */
+button {
+  font:inherit; font-size:13px; letter-spacing:.03em; font-weight:500;
+  height:40px; padding:0 16px; border-radius:var(--radius); border:1px solid transparent;
+  cursor:pointer; transition:opacity var(--t) var(--ease), transform var(--t) var(--ease);
+}
+button:active { transform:translateY(1px); opacity:.92; }
+button:focus-visible { outline:2px solid var(--charcoal); outline-offset:2px; }
+.btn-primary { background:var(--accent); color:var(--on-accent); }
+.btn-standard { background:var(--charcoal); color:var(--chassis-white); }
+.btn-quiet { background:transparent; color:var(--charcoal); border-color:var(--line-grey); }
+
+/* toggle */
+.toggle { display:flex; align-items:center; gap:var(--gap-in-lg); }
+.toggle button {
+  width:36px; height:20px; padding:0; border-radius:var(--radius);
+  background:var(--panel-grey); border:1px solid var(--line-grey); position:relative;
+}
+.toggle button::after {
+  content:""; position:absolute; top:1px; left:1px; width:16px; height:16px;
+  border-radius:2px; background:var(--charcoal);
+  transition:transform var(--t) var(--ease);
+}
+.toggle button[aria-pressed="true"]::after { transform:translateX(16px); }
+.toggle .val { font-size:13px; letter-spacing:.03em; min-width:3ch; }
+
+/* slider */
+.slider { display:flex; flex-direction:column; gap:var(--gap-in); max-width:320px; }
+input[type=range] { -webkit-appearance:none; appearance:none; width:100%; background:transparent; margin:0; height:16px; }
+input[type=range]::-webkit-slider-runnable-track { height:2px; background:var(--line-grey); }
+input[type=range]::-moz-range-track { height:2px; background:var(--line-grey); }
+input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance:none; appearance:none; width:8px; height:20px; border-radius:var(--radius);
+  background:var(--charcoal); margin-top:-9px;
+}
+input[type=range]::-moz-range-thumb {
+  width:8px; height:20px; border-radius:var(--radius); background:var(--charcoal); border:none;
+}
+input[type=range]:focus-visible { outline:2px solid var(--charcoal); outline-offset:4px; }
+.ticks { display:flex; justify-content:space-between; }
+.ticks i { width:1px; height:6px; background:var(--line-grey); display:block; }
+.scale { display:flex; justify-content:space-between; font-size:13px; letter-spacing:.03em; color:var(--text-secondary); }
+
+/* input */
+.field { display:flex; flex-direction:column; gap:var(--gap-in); max-width:320px; }
+.field label { font-size:13px; letter-spacing:.03em; color:var(--text-secondary); }
+.field input {
+  font:inherit; font-size:15px; height:40px; padding:0 12px;
+  background:var(--chassis-white); color:var(--charcoal);
+  border:1px solid var(--line-grey); border-radius:var(--radius);
+}
+.field input:focus { outline:2px solid var(--charcoal); outline-offset:2px; border-color:var(--charcoal); }
+
+/* code */
+pre {
+  margin:0; padding:12px 16px; overflow-x:auto;
+  background:var(--chassis-warm); border:1px solid var(--line-grey); border-radius:var(--radius);
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:13px; line-height:1.5;
+  color:var(--charcoal);
+}
+footer { margin-top:56px; padding-top:24px; border-top:1px solid var(--line-grey); }
+.zh { max-width:44em; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header>
+    <h1>rams-braun-ui</h1>
+    <p class="sub">a braun-era dieter rams design system, quantified into tokens and hard rules, packaged as an agent skill for claude and claude code.</p>
+    <nav>
+      <a href="https://github.com/yangyue1974/rams-braun-ui">github</a>
+      <a href="#install">install</a>
+      <a href="https://github.com/yangyue1974/rams-braun-ui/blob/main/SKILL.md">skill.md</a>
+    </nav>
+  </header>
+
+  <section>
+    <h2>what this is</h2>
+    <div class="stack">
+      <p>Rams' ten principles are a verdict, not a recipe. This skill is the recipe: every rule is reverse-engineered from Braun hardware — SK4, TP1, ET66, T3, TG60, regie 510 — and Vitsoe 606, then quantified into hex values, a type scale, spacing ratios and a forbidden list, so an agent can produce UI that reads as <em>Braun</em> rather than as "generic minimal".</p>
+      <p>The ten principles come back at the end, where they belong: as the QA gate.</p>
+      <p class="small sec">this page is built entirely from the skill's own tokens. it is the specimen, not a mock-up of one.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>the rules, in one breath</h2>
+    <table class="spec">
+      <tbody>
+        <tr><td>neutral surface area</td><td>≥ 95%</td></tr>
+        <tr><td>accent hues per view</td><td>1, on the primary operation</td></tr>
+        <tr><td>chroma budget</td><td>≤ 5% of pixels</td></tr>
+        <tr><td>ui label case</td><td>lowercase</td></tr>
+        <tr><td>gap inside a zone</td><td>8–12px</td></tr>
+        <tr><td>gap between zones</td><td>24–32px (2–3×)</td></tr>
+        <tr><td>corner radius</td><td>4px, global</td></tr>
+        <tr><td>font sizes per screen</td><td>≤ 3</td></tr>
+        <tr><td>font weights</td><td>400 / 500</td></tr>
+        <tr><td>motion</td><td>120–180ms ease-out</td></tr>
+        <tr><td>shadow at rest</td><td>none</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>chassis neutrals</h2>
+    <div class="swatches">
+      <div class="sw"><i style="background:#F2EFE9"></i><b>chassis white</b><span>#F2EFE9</span></div>
+      <div class="sw"><i style="background:#E9E5DC"></i><b>chassis warm</b><span>#E9E5DC</span></div>
+      <div class="sw"><i style="background:#D6D3CC"></i><b>panel grey</b><span>#D6D3CC</span></div>
+      <div class="sw"><i style="background:#BDBAB2"></i><b>line grey</b><span>#BDBAB2</span></div>
+      <div class="sw"><i style="background:#6E6C66"></i><b>text secondary</b><span>#6E6C66</span></div>
+      <div class="sw"><i style="background:#221F1A"></i><b>charcoal</b><span>#221F1A</span></div>
+    </div>
+    <p class="small sec" style="margin-top:12px">never #000, never #FFF — braun neutrals are warm.</p>
+  </section>
+
+  <section>
+    <h2>functional accents — pick one per view</h2>
+    <div class="accents">
+      <div><i style="background:#E8501E"></i>#E8501E · primary action</div>
+      <div><i style="background:#46704F"></i>#46704F · start / on</div>
+      <div><i style="background:#F2A900"></i>#F2A900 · execute</div>
+      <div><i style="background:#C13A27"></i>#C13A27 · destructive</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>controls</h2>
+    <div class="panel stack" style="gap:var(--gap-zone)">
+
+      <div class="stack-tight">
+        <div class="small sec">buttons</div>
+        <div class="row">
+          <button class="btn-standard" type="button">standard</button>
+          <button class="btn-quiet" type="button">quiet</button>
+        </div>
+        <div class="small sec">primary carries the accent — this view spends it in the install zone below. a view gets exactly one.</div>
+      </div>
+
+      <div class="stack-tight">
+        <div class="small sec">toggle — state shown by displacement and a label, never by color alone</div>
+        <div class="toggle">
+          <button id="tg" type="button" aria-pressed="false" aria-label="mono"></button>
+          <span class="val" id="tgv">off</span>
+          <span class="small sec">mono</span>
+        </div>
+      </div>
+
+      <div class="stack-tight">
+        <div class="small sec">slider — a scale is not decoration; the value is always readable at rest</div>
+        <div class="slider">
+          <input id="sl" type="range" min="0" max="10" step="1" value="6" aria-label="level">
+          <div class="ticks"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+          <div class="scale"><span>0</span><span id="slv">6</span><span>10</span></div>
+        </div>
+      </div>
+
+      <div class="stack-tight">
+        <div class="small sec">input — label above the field, never placeholder-as-label</div>
+        <div class="field">
+          <label for="nm">project name</label>
+          <input id="nm" type="text" value="regie 510">
+        </div>
+      </div>
+
+      <div class="stack-tight">
+        <div class="small sec">table — hairline separators only, numerals right-aligned</div>
+        <table>
+          <thead><tr><th>product</th><th>year</th><th class="num">units</th></tr></thead>
+          <tbody>
+            <tr><td>sk4</td><td>1956</td><td class="num">1</td></tr>
+            <tr><td>tp1</td><td>1959</td><td class="num">4</td></tr>
+            <tr><td>et66</td><td>1987</td><td class="num">12</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+    </div>
+  </section>
+
+  <section id="install">
+    <h2>install</h2>
+    <div class="stack">
+      <p class="small sec">claude code — drop the folder at one of these paths:</p>
+      <pre id="cmd">~/.claude/skills/rams-braun-ui/     # personal
+.claude/skills/rams-braun-ui/       # project</pre>
+      <div class="row">
+        <button class="btn-primary" id="copy" type="button">copy path</button>
+        <span class="small sec" id="copied" aria-live="polite"></span>
+      </div>
+      <p class="small sec">claude.ai — settings → capabilities → enable code execution, then customize → skills → “+” → upload this folder as a zip.</p>
+      <p>Then say <em>use the rams-braun-ui skill to build …</em>, or just ask for “rams style” / “braun style” / “拉姆斯风格”.</p>
+      <p class="small sec">on first runs, don't add your own style adjectives (“minimal”, “premium”…). let the skill drive alone — then tighten the tokens, not the prompt.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>中文</h2>
+    <div class="stack zh">
+      <p>这不是把拉姆斯十大原则复述一遍——十大原则是验收标准，不是生成规则。这个 Skill 把 Braun 产品（1955–1995）的设计语言逆向成了可执行的硬规格：色板 hex、字号表、间距比例、圆角、禁令清单，最后才让十大原则回到它该在的位置——QA 层。</p>
+      <p>装进 Claude / Claude Code，说一句“用拉姆斯风格做个页面”即可。这个页面本身就是它的输出样本。</p>
+    </div>
+  </section>
+
+  <footer class="stack-tight">
+    <p class="small sec">hex values and measurements are derived from photographic reference of braun products; they are internally consistent approximations, not official braun specifications.</p>
+    <p class="small sec">an homage to the work of dieter rams and the braun design department. unaffiliated with braun gmbh or vitsoe. mit licensed.</p>
+  </footer>
+
+</div>
+
+<script>
+  var tg = document.getElementById('tg'), tgv = document.getElementById('tgv');
+  tg.addEventListener('click', function () {
+    var on = tg.getAttribute('aria-pressed') === 'true';
+    tg.setAttribute('aria-pressed', String(!on));
+    tgv.textContent = on ? 'off' : 'on';
+  });
+
+  var sl = document.getElementById('sl'), slv = document.getElementById('slv');
+  sl.addEventListener('input', function () { slv.textContent = sl.value; });
+
+  var copy = document.getElementById('copy'), copied = document.getElementById('copied');
+  copy.addEventListener('click', function () {
+    navigator.clipboard.writeText('~/.claude/skills/rams-braun-ui/').then(function () {
+      copied.textContent = 'copied';
+      setTimeout(function () { copied.textContent = ''; }, 2000);
+    });
+  });
+</script>
+</body>
+</html>

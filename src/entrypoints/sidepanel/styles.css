@@ -976,8 +976,30 @@ button:disabled {
 
 .field-input:focus,
 .field-select:focus {
-  outline: none;
-  border-color: var(--accent);
+  outline: 1px solid var(--line-strong);
+  outline-offset: 1px;
+  border-color: var(--line-strong);
+}
+
+.publish-zones-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.rams-zone-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line-subtle);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.03em;
+  text-transform: lowercase;
+  color: var(--text-primary);
 }
 
 .toggle-row {
