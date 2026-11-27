@@ -254,8 +254,8 @@ export async function ingestCandidates(candidates: ExtractedCandidate[]): Promis
   return { inserted, updated, items: storedItems };
 }
 
-export async function getUnreadQueue(limit = 60): Promise<FeedItem[]> {
-  const all = await db.feedItems.orderBy('capturedAt').reverse().limit(250).toArray();
+export async function getUnreadQueue(limit = 500): Promise<FeedItem[]> {
+  const all = await db.feedItems.orderBy('capturedAt').reverse().toArray();
   return all.filter((item) => item.consumedInEpisodeId === null).slice(0, limit);
 }
 

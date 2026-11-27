@@ -11,6 +11,7 @@ import {
   type TTSMode,
 } from '../../shared/types';
 import { formatElapsedTime, formatRemainingTime } from '../../shared/progress-utils';
+import { FocusTopicsBar } from './FocusTopicsBar';
 
 export interface ResynthesizeRequest {
   episodeId: string;
@@ -68,6 +69,7 @@ interface PlayerPanelProps {
   jobEstimatedRemainingSec?: number | null;
   onPatrolAndPlay?: () => void;
   onGoToSettings?: () => void;
+  onPatchFocusTopics?: (focusTopics: string) => void | Promise<void>;
 }
 
 function inferPipelineStage(
@@ -136,6 +138,7 @@ export function PlayerPanel({
   jobEstimatedRemainingSec = null,
   onPatrolAndPlay,
   onGoToSettings,
+  onPatchFocusTopics,
 }: PlayerPanelProps) {
   const [subTab, setSubTab] = useState<'script' | 'library'>('script');
   const [search, setSearch] = useState('');
@@ -284,6 +287,15 @@ export function PlayerPanel({
               ソースを変更
             </button>
           </div>
+
+          {onPatchFocusTopics && (
+            <FocusTopicsBar
+              compact
+              label="関心トピック"
+              focusTopics={settings.focusTopics}
+              onChange={onPatchFocusTopics}
+            />
+          )}
 
           {isJobRunning && (
             <>

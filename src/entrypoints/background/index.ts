@@ -1103,7 +1103,9 @@ async function generateEpisodeFromItems(
     broadcastEvent({ type: 'QUEUE_UPDATED' });
   }
 
-  const queueItems = filtered.kept.slice(0, settings.maxItemsPerPatrol || 24);
+  const queueItems = isExplicit
+    ? filtered.kept.slice(0, 60)
+    : filtered.kept.slice(0, settings.maxItemsPerPatrol || 24);
   if (queueItems.length === 0) {
     throw new Error(
       '過去番組と重複していない最新アイテムがありませんでした。新しく巡回してからお試しください。'

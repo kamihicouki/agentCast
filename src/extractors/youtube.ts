@@ -86,6 +86,7 @@ const VIDEO_CARD_SELECTOR = [
   'ytd-rich-item-renderer',
   'ytd-grid-video-renderer',
   'ytd-video-renderer',
+  'ytd-playlist-video-renderer',
   'yt-lockup-view-model',
 ].join(', ');
 

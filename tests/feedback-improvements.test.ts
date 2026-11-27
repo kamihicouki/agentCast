@@ -206,3 +206,91 @@ describe('Progress percentage, ETA, and SidePanelScope defaults', () => {
     expect(DEFAULT_SETTINGS.sidePanelScope).toBe('window');
   });
 });
+
+import { JSDOM } from 'jsdom';
+import {
+  addFocusTopic,
+  parseFocusTopics,
+  removeFocusTopic,
+  toggleFocusTopic,
+} from '../src/shared/topic-utils';
+import { extractFromDocument } from '../src/extractors';
+import { buildPodcastScriptPrompt } from '../src/providers/prompt-builder';
+
+describe('Focus topic tags, bookmark/list extraction, and 60-min long podcasts', () => {
+  it('parses, adds, removes, and toggles focus topic tags cleanly', () => {
+    expect(parseFocusTopics('AI・テクノロジー・開発トレンド')).toEqual([
+      'AI',
+      'テクノロジー',
+      '開発トレンド',
+    ]);
+    expect(parseFocusTopics('AI, 医療、株 / AI')).toEqual(['AI', '医療', '株']);
+    expect(addFocusTopic('AI・テクノロジー', '仏壇')).toBe('AI・テクノロジー・仏壇');
+    expect(addFocusTopic('AI・テクノロジー', 'AI')).toBe('AI・テクノロジー');
+    expect(removeFocusTopic('AI・テクノロジー・仏壇', 'テクノロジー')).toBe('AI・仏壇');
+    expect(toggleFocusTopic('AI・テクノロジー', 'デザイン')).toBe('AI・テクノロジー・デザイン');
+    expect(toggleFocusTopic('AI・テクノロジー', 'AI')).toBe('テクノロジー');
+  });
+
+  it('extracts videos from YouTube Watch Later / Liked Videos playlist cards (ytd-playlist-video-renderer)', () => {
+    const dom = new JSDOM(`
+      <html><body>
+        <ytd-playlist-video-renderer>
+          <a id="video-title" href="/watch?v=dQw4w9WgXcQ&list=WL" title="AIエージェント最新動向">AIエージェント最新動向</a>
+          <ytd-channel-name><a href="/@techch">Tech Channel</a></ytd-channel-name>
+        </ytd-playlist-video-renderer>
+      </body></html>
+    `);
+    const res = extractFromDocument(dom.window.document, 'https://www.youtube.com/playlist?list=WL');
+    expect(res.blocked).toBe(false);
+    expect(res.candidates.length).toBe(1);
+    expect(res.candidates[0].source).toBe('youtube');
+    expect(res.candidates[0].title).toContain('AIエージェント最新動向');
+  });
+
+  it('extracts tweets from X.com Lists and Bookmarks pages', () => {
+    const dom = new JSDOM(`
+      <html><body>
+        <article data-testid="tweet">
+          <div data-testid="User-Name"><span>Alice</span><span>@alice_dev</span></div>
+          <div data-testid="tweetText">Xのリストから最新のAIニュースを収集するテスト投稿です。</div>
+          <a href="/alice_dev/status/1234567890"><time datetime="2026-11-27T00:00:00Z">1h</time></a>
+        </article>
+      </body></html>
+    `);
+    const listRes = extractFromDocument(dom.window.document, 'https://x.com/i/lists/9999999');
+    expect(listRes.blocked).toBe(false);
+    expect(listRes.candidates.length).toBe(1);
+    expect(listRes.candidates[0].source).toBe('x');
+
+    const bmRes = extractFromDocument(dom.window.document, 'https://x.com/i/bookmarks');
+    expect(bmRes.blocked).toBe(false);
+    expect(bmRes.candidates.length).toBe(1);
+    expect(bmRes.candidates[0].source).toBe('x');
+  });
+
+  it('supports long episodes up to 60 minutes in buildPodcastScriptPrompt', () => {
+    const item: FeedItem = {
+      id: 'i1',
+      source: 'generic',
+      url: 'https://example.com/a',
+      canonicalUrl: 'https://example.com/a',
+      title: '長尺テスト記事',
+      author: 'author',
+      content: '詳細な解説本文です。',
+      excerpt: '詳細な解説本文です。',
+      outboundUrls: [],
+      publishedAt: new Date().toISOString(),
+      capturedAt: new Date().toISOString(),
+      engagementScore: 5,
+      consumedInEpisodeId: null,
+    };
+    const prompt = buildPodcastScriptPrompt([item], {
+      ...DEFAULT_SETTINGS,
+      durationMode: 'fixed',
+      targetDurationMin: 60,
+    });
+    expect(prompt).toContain('60 分');
+    expect(prompt).toContain('9〜14個');
+  });
+});

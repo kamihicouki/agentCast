@@ -15,6 +15,7 @@ import type { RuntimeRequest } from '../../shared/messages';
 import { DATA_CONSENT_REQUIRED, PRIVACY_POLICY_URL } from '../../shared/data-consent';
 import { ensureHostPermissionsForUrls } from '../../shared/permissions';
 import { buildYouTubeStudioUploadUrl } from '../../shared/publish-utils';
+import { FocusTopicsBar } from './FocusTopicsBar';
 
 interface SettingsPanelProps {
   settings: ExtensionSettings;
@@ -77,7 +78,7 @@ export function SettingsPanel({
       : '未設定';
 
   const durationMode: DurationMode = settings.durationMode || 'fixed';
-  const durationMin = Math.max(3, Math.min(30, settings.targetDurationMin || 10));
+  const durationMin = Math.max(3, Math.min(60, settings.targetDurationMin || 10));
   const currentTheme: AppThemeId = settings.theme || 'braun';
   const activeThemeMeta = APP_THEMES.find((t) => t.id === currentTheme) || APP_THEMES[0];
 
@@ -421,7 +422,7 @@ export function SettingsPanel({
               id="slider-default-duration"
               type="range"
               min={3}
-              max={30}
+              max={60}
               step={1}
               value={durationMin}
               onChange={(e) => void onPatchSettings({ targetDurationMin: Number(e.target.value) })}
@@ -429,7 +430,7 @@ export function SettingsPanel({
               aria-label="デフォルト番組長さ（分）"
             />
             <div className="slider-ticks">
-              {[5, 10, 15, 20, 30].map((m) => (
+              {[5, 10, 15, 20, 30, 45, 60].map((m) => (
                 <button
                   key={m}
                   type="button"
@@ -443,14 +444,16 @@ export function SettingsPanel({
           </div>
         ) : (
           <p className="field-hint" style={{ marginTop: 8 }}>
-            収集した素材の情報量に応じて、AI が自然な長さ（約 5〜20 分）に自動調整します。
+            収集した素材の情報量に応じて、AI が自然な長さ（約 5〜30 分）に自動調整します。
           </p>
         )}
       </div>
 
       {/* Personality, Focus & Schedule */}
-      <details className="n-card extract-details">
-        <summary>パーソナリティ・関心・鮮度・スケジュール</summary>
+      <div className="n-card">
+        <div className="card-head-row">
+          <strong>パーソナリティ・関心・鮮度・スケジュール</strong>
+        </div>
         <div style={{ marginTop: 12 }}>
           <div className="grid-2">
             <div className="field-row">
@@ -503,11 +506,9 @@ export function SettingsPanel({
             </div>
           )}
           <div className="field-row">
-            <label className="field-label">重視する関心トピック</label>
-            <input
-              className="field-input"
-              value={settings.focusTopics}
-              onChange={(e) => void onPatchSettings({ focusTopics: e.target.value })}
+            <FocusTopicsBar
+              focusTopics={settings.focusTopics}
+              onChange={(focusTopics) => void onPatchSettings({ focusTopics })}
             />
           </div>
           <div className="field-row">
@@ -561,11 +562,13 @@ export function SettingsPanel({
             </div>
           )}
         </div>
-      </details>
+      </div>
 
       {/* Publish Settings */}
-      <details className="n-card extract-details">
-        <summary>自動投稿・公開先設定（YouTube / X）</summary>
+      <div className="n-card">
+        <div className="card-head-row">
+          <strong>自動投稿・公開先設定（YouTube / X）</strong>
+        </div>
         <div style={{ marginTop: 12 }}>
           <div className="field-row">
             <label className="field-label">自動投稿の実行モード</label>
@@ -733,7 +736,7 @@ export function SettingsPanel({
             />
           </div>
         </div>
-      </details>
+      </div>
 
       {/* Dev Build & Demo */}
       <div className="n-card">

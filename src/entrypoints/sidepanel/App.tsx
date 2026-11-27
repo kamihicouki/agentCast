@@ -242,7 +242,7 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
   const refreshData = useCallback(async () => {
     const [eps, unread, savedSettings] = await Promise.all([
       db.episodes.orderBy('createdAt').reverse().limit(30).toArray(),
-      getUnreadQueue(80),
+      getUnreadQueue(500),
       getSettings(),
     ]);
     setEpisodes(eps);
@@ -315,7 +315,7 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
             }
           });
       } else if (msg?.type === 'QUEUE_UPDATED') {
-        void getUnreadQueue(80).then(setQueue);
+        void getUnreadQueue(500).then(setQueue);
       } else if (msg?.type === 'PATROL_PROGRESS') {
         setBusyMessage(typeof msg.message === 'string' ? msg.message : '');
         if (typeof msg.isJobRunning === 'boolean') {
@@ -1120,6 +1120,7 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
             jobEstimatedRemainingSec={jobEstimatedRemainingSec}
             onPatrolAndPlay={() => void handlePatrolAndPlay()}
             onGoToSettings={() => setTab('settings')}
+            onPatchFocusTopics={(focusTopics) => void handlePatchSettings({ focusTopics })}
           />
         )}
 
@@ -1171,6 +1172,7 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
                 onClearQueue={handleClearQueue}
                 onGoToPatrol={() => setSourcesSubTab('patrol')}
                 onGoToPlayer={() => setTab('listen')}
+                onPatchFocusTopics={(focusTopics) => void handlePatchSettings({ focusTopics })}
                 showToast={showToast}
                 setErrorBanner={setErrorBanner}
               />

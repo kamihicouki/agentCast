@@ -150,16 +150,18 @@ export function buildPodcastScriptPrompt(
   const now = options.now ?? Date.now();
   const recentTopics = options.recentTopics ?? [];
   const isAutoDuration = settings.durationMode === 'auto';
-  const dur = Math.max(3, Math.min(30, Math.round(settings.targetDurationMin || 10)));
+  const dur = Math.max(3, Math.min(60, Math.round(settings.targetDurationMin || 10)));
   const targetChapters = isAutoDuration
-    ? '素材の情報量に合わせて自然な数（3〜6個程度）'
+    ? '素材の情報量に合わせて自然な数（3〜8個程度）'
     : dur <= 5
       ? '2〜3個'
       : dur <= 10
         ? '4〜5個'
         : dur <= 18
           ? '5〜7個'
-          : '7〜9個';
+          : dur <= 30
+            ? '7〜9個'
+            : '9〜14個';
   const turnsPerChapter = isAutoDuration
     ? '話題の重要度に応じて5〜10往復'
     : dur <= 5
@@ -168,7 +170,9 @@ export function buildPodcastScriptPrompt(
         ? '6〜9往復'
         : dur <= 18
           ? '8〜12往復'
-          : '10〜14往復';
+          : dur <= 30
+            ? '10〜14往復'
+            : '12〜18往復';
   const durationGuidance = isAutoDuration
     ? '全体尺は素材量に応じて無理なく聴き切れる自然な長さ（おまかせ）に調整し、'
     : `全体の再生時間がおよそ ${dur} 分になるようにペース配分し、`;

@@ -6,6 +6,7 @@ import {
   type FeedItem,
 } from '../../shared/types';
 import type { RuntimeRequest } from '../../shared/messages';
+import { FocusTopicsBar } from './FocusTopicsBar';
 
 interface QueuePanelProps {
   queue: FeedItem[];
@@ -15,6 +16,7 @@ interface QueuePanelProps {
   onClearQueue: () => Promise<void>;
   onGoToPatrol: () => void;
   onGoToPlayer: () => void;
+  onPatchFocusTopics?: (focusTopics: string) => void | Promise<void>;
   showToast: (msg: string) => void;
   setErrorBanner: (msg: string) => void;
 }
@@ -27,6 +29,7 @@ export function QueuePanel({
   onClearQueue,
   onGoToPatrol,
   onGoToPlayer,
+  onPatchFocusTopics,
   showToast,
   setErrorBanner,
 }: QueuePanelProps) {
@@ -139,7 +142,7 @@ export function QueuePanel({
               <input
                 type="range"
                 min={3}
-                max={30}
+                max={60}
                 step={1}
                 value={runDurationMin}
                 onChange={(e) => setRunDurationMin(Number(e.target.value))}
@@ -147,7 +150,7 @@ export function QueuePanel({
                 aria-label="今回の番組の長さ（分）"
               />
               <div className="slider-ticks">
-                {[5, 10, 15, 20, 30].map((m) => (
+                {[5, 10, 15, 20, 30, 45, 60].map((m) => (
                   <button
                     key={m}
                     type="button"
@@ -165,6 +168,17 @@ export function QueuePanel({
             </p>
           )}
         </div>
+
+        {onPatchFocusTopics && (
+          <div style={{ marginTop: 10 }}>
+            <FocusTopicsBar
+              compact
+              label="関心トピック"
+              focusTopics={settings.focusTopics}
+              onChange={onPatchFocusTopics}
+            />
+          </div>
+        )}
 
         <div className="queue-compose-actions">
           <button

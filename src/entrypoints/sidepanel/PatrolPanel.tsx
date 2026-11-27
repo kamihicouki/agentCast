@@ -70,6 +70,20 @@ const EMPTY_SITE_DRAFT: Omit<CustomSiteConfig, 'id'> = {
   notes: '',
 };
 
+const COLLECTION_SOURCE_PRESETS: Array<{
+  label: string;
+  name: string;
+  url: string;
+  scrollSteps: number;
+}> = [
+  { label: '𝕏 ブックマーク', name: 'X ブックマーク', url: 'https://x.com/i/bookmarks', scrollSteps: 2 },
+  { label: '📺 YouTube 後で見る', name: 'YouTube 後で見る', url: 'https://www.youtube.com/playlist?list=WL', scrollSteps: 1 },
+  { label: '👍 YouTube 高く評価', name: 'YouTube 高く評価', url: 'https://www.youtube.com/playlist?list=LL', scrollSteps: 1 },
+  { label: '📝 Note スキした記事', name: 'Note スキした記事', url: 'https://note.com/likes', scrollSteps: 1 },
+  { label: '📘 Zenn ブックマーク', name: 'Zenn ブックマーク', url: 'https://zenn.dev/dashboard/bookmarks', scrollSteps: 1 },
+  { label: '🌐 Google News 保存済み', name: 'Google News 保存済み', url: 'https://news.google.com/my/library', scrollSteps: 1 },
+];
+
 export function PatrolPanel({
   settings,
   isJobRunning,
@@ -1160,21 +1174,59 @@ export function PatrolPanel({
 
       {isAddOpen && (
         <div className="n-card" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div className="quick-collection-box" style={{ borderTop: 'none', paddingTop: 0 }}>
+            <div className="field-label">ブックマーク・お気に入り・リストを1クリック追加</div>
+            <div className="quick-collection-chips">
+              {COLLECTION_SOURCE_PRESETS.map((preset) => {
+                const alreadyAdded = (settings.customSites || []).some((s) => s.url === preset.url);
+                return (
+                  <button
+                    key={preset.url}
+                    type="button"
+                    className="btn-secondary btn-compact"
+                    disabled={alreadyAdded}
+                    onClick={() => {
+                      void (async () => {
+                        const newSite: CustomSiteConfig = {
+                          id: `site-${Date.now()}`,
+                          name: preset.name,
+                          url: preset.url,
+                          enabled: true,
+                          passiveEnabled: false,
+                          extractionStrategy: 'auto',
+                          scrollSteps: preset.scrollSteps,
+                        };
+                        await onPatchSettings({
+                          customSites: [...(settings.customSites || []), newSite],
+                        });
+                        showToast(`「${preset.name}」を巡回ソースに追加しました`);
+                      })();
+                    }}
+                  >
+                    {alreadyAdded ? `✓ ${preset.label}` : `＋ ${preset.label}`}
+                  </button>
+                );
+              })}
+            </div>
+            <p className="field-hint" style={{ margin: 0 }}>
+              <strong>X.com リスト</strong>（<code>x.com/i/lists/...</code>）や YouTube プレイリストは、対象ページを開いて「＋ 今のタブを登録」を押すか下にURLを貼り付けて追加できます。
+            </p>
+          </div>
           <div className="field-row">
             <label className="field-label">サイト名（任意）</label>
             <input
               className="field-input"
               value={siteDraft.name}
-              placeholder="例: Antigravity Changelog"
+              placeholder="例: X AIリスト / Antigravity Changelog"
               onChange={(e) => setSiteDraft({ ...siteDraft, name: e.target.value })}
             />
           </div>
           <div className="field-row">
-            <label className="field-label">URL / RSSフィード</label>
+            <label className="field-label">URL / Xリスト / プレイリスト / RSS</label>
             <input
               className="field-input"
               value={siteDraft.url}
-              placeholder="https://..."
+              placeholder="https://x.com/i/lists/... または https://..."
               onChange={(e) => setSiteDraft({ ...siteDraft, url: e.target.value })}
             />
           </div>
