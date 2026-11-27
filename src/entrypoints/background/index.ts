@@ -44,6 +44,7 @@ import {
   buildYouTubeMetadata,
   buildYouTubeStudioUploadUrl,
   readBlobChunkAsBase64,
+  shouldAttachVideoToXPost,
 } from '../../shared/publish-utils';
 import { parseZennRssXml } from '../../extractors/zenn';
 import { parseGenericRssOrAtomXml } from '../../extractors/custom-site';
@@ -2297,6 +2298,7 @@ let pendingPublishVideoBlob: Blob | null = null;
 
 interface InternalPublishPipeline extends PublishPipelineStatus {
   autoSubmit: boolean;
+  isYtToXAutoLink: boolean;
   mediaJobId?: string;
   fileName?: string;
   videoSizeBytes?: number;
@@ -2311,6 +2313,7 @@ const publishPipeline: InternalPublishPipeline = {
   message: '',
   error: '',
   autoSubmit: true,
+  isYtToXAutoLink: false,
   hasVideo: false,
 };
 
@@ -2335,6 +2338,7 @@ function resetPublishPipeline(message = '', error = ''): void {
   publishPipeline.remainingPlatforms = [];
   publishPipeline.message = message;
   publishPipeline.error = error;
+  publishPipeline.isYtToXAutoLink = false;
   publishPipeline.mediaJobId = undefined;
   publishPipeline.fileName = undefined;
   publishPipeline.videoSizeBytes = undefined;
@@ -2355,6 +2359,7 @@ function cancelPublishPipeline(reason: string): void {
   publishPipeline.remainingPlatforms = [];
   publishPipeline.message = reason;
   publishPipeline.error = '';
+  publishPipeline.isYtToXAutoLink = false;
   publishPipeline.mediaJobId = undefined;
   publishPipeline.fileName = undefined;
   publishPipeline.videoSizeBytes = undefined;
@@ -2439,7 +2444,10 @@ async function launchPublishPlatformStep(platform: 'youtube' | 'x'): Promise<voi
   const ytUrl = publishPipeline.youtubeUrl || episode.publishedYouTubeUrl;
   const xPayload = buildXPostPayload(episode, settings.publish, { youtubeUrl: ytUrl });
   const targetUrl = `https://x.com/compose/post?text=${encodeURIComponent(xPayload.postText)}`;
-  const attachVideo = Boolean(settings.publish.xAttachVideo && publishPipeline.hasVideo);
+  const attachVideo = shouldAttachVideoToXPost(settings.publish, {
+    isYtToXAutoLink: publishPipeline.isYtToXAutoLink,
+    hasVideo: publishPipeline.hasVideo,
+  });
 
   publishPipeline.message = ytUrl
     ? 'YouTube URL を含めて X.com 自動投稿を開始しています...'
@@ -2513,15 +2521,18 @@ async function startAutoPublishPipeline(
     }
   }
 
+  const isYtToXAutoLink = ordered.includes('youtube') && ordered.includes('x');
   const hasAudio = episode.chapters.some((c) => c.hasAudioBlob);
+  const xNeedsVideo = shouldAttachVideoToXPost(settings.publish, { isYtToXAutoLink });
   const needsVideo =
-    hasAudio && (ordered.includes('youtube') || (ordered.includes('x') && settings.publish.xAttachVideo));
+    hasAudio && (ordered.includes('youtube') || (ordered.includes('x') && xNeedsVideo));
 
   publishPipeline.running = true;
   publishPipeline.episodeId = episodeId;
   publishPipeline.currentPlatform = ordered[0];
   publishPipeline.remainingPlatforms = ordered.slice(1);
   publishPipeline.autoSubmit = autoSubmit;
+  publishPipeline.isYtToXAutoLink = isYtToXAutoLink;
   publishPipeline.youtubeUrl = episode.publishedYouTubeUrl;
   publishPipeline.xUrl = episode.publishedXUrl;
   publishPipeline.error = '';

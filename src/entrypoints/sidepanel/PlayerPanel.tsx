@@ -552,7 +552,9 @@ export function PlayerPanel({
                 onClick={onPublishX}
                 title={
                   settings.publish.autoPublishMode !== 'manual_confirm'
-                    ? 'X.com で動画添付〜ポストまで自動実行（YouTube公開済みならURLも自動挿入）'
+                    ? settings.publish.xAttachVideo
+                      ? 'X.com で動画添付〜ポストまで自動実行（YouTube公開済みならURLも自動挿入）'
+                      : 'X.com でポストまで自動実行（YouTube公開済みならリンクも自動挿入）'
                     : 'X.com の投稿画面を開いてガイドを表示'
                 }
               >
@@ -564,7 +566,11 @@ export function PlayerPanel({
                 disabled={isExporting || isPublishing || displayedEpisode.status !== 'ready'}
                 onClick={onPublishBoth}
                 style={{ gridColumn: '1 / -1' }}
-                title="YouTube へ自動公開したあと、取得した動画 URL を含めて X.com へ連続自動投稿します"
+                title={
+                  settings.publish.ytToXMediaMode === 'link_and_video'
+                    ? 'YouTube へ自動公開したあと、動画リンクと MP4 動画を添付して X.com へ連続自動投稿します'
+                    : 'YouTube へ自動公開したあと、取得した動画リンクのみを添付して X.com へ自動投稿します'
+                }
               >
                 {isPublishing ? '自動投稿を実行中...' : 'YT → X 自動投稿'}
               </button>

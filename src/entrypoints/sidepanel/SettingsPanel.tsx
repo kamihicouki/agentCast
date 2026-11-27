@@ -10,6 +10,7 @@ import {
   type DurationMode,
   type ExtensionSettings,
   type YouTubeVisibility,
+  type YtToXMediaMode,
 } from '../../shared/types';
 import type { RuntimeRequest } from '../../shared/messages';
 import { DATA_CONSENT_REQUIRED, PRIVACY_POLICY_URL } from '../../shared/data-consent';
@@ -711,6 +712,27 @@ export function SettingsPanel({
               }
             />
           </div>
+          <div className="field-row">
+            <label className="field-label">YT → X 自動連携時の X 投稿形式</label>
+            <select
+              className="field-select"
+              value={settings.publish.ytToXMediaMode || 'link_only'}
+              onChange={(e) =>
+                void onPatchSettings({
+                  publish: {
+                    ...settings.publish,
+                    ytToXMediaMode: e.target.value as YtToXMediaMode,
+                  },
+                })
+              }
+            >
+              <option value="link_only">YouTube リンク添付のみ（デフォルト・高速）</option>
+              <option value="link_and_video">YouTube リンク ＋ MP4 動画も添付</option>
+            </select>
+            <p className="field-hint">
+              「YT → X 自動投稿」や生成後の自動連携では、YouTube 動画リンクの添付のみで十分です（必要に応じて MP4 動画の同時添付も選べます）。
+            </p>
+          </div>
           <div className="toggle-row">
             <span>YouTube 公開後の動画 URL を X 投稿本文に自動挿入</span>
             <input
@@ -724,10 +746,10 @@ export function SettingsPanel({
             />
           </div>
           <div className="toggle-row">
-            <span>X 投稿時に MP4 動画を自動添付</span>
+            <span>X 単体投稿時に MP4 動画を自動添付</span>
             <input
               type="checkbox"
-              checked={settings.publish.xAttachVideo}
+              checked={Boolean(settings.publish.xAttachVideo)}
               onChange={(e) =>
                 void onPatchSettings({
                   publish: { ...settings.publish, xAttachVideo: e.target.checked },

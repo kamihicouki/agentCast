@@ -156,6 +156,17 @@ export function buildXPostPayload(
   return { postText, threadReplyText };
 }
 
+export function shouldAttachVideoToXPost(
+  publish: Pick<PublishSettings, 'xAttachVideo' | 'ytToXMediaMode'>,
+  options: { isYtToXAutoLink: boolean; hasVideo?: boolean }
+): boolean {
+  if (options.hasVideo === false) return false;
+  if (options.isYtToXAutoLink) {
+    return publish.ytToXMediaMode === 'link_and_video';
+  }
+  return Boolean(publish.xAttachVideo);
+}
+
 export const MAX_PUBLISH_VIDEO_CHUNK_BYTES = 8 * 1024 * 1024;
 
 export function bytesToBase64(bytes: Uint8Array): string {

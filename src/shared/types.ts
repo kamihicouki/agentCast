@@ -349,6 +349,7 @@ export type AIMode = 'gemini_api' | 'openai_api' | 'web_chatgpt' | 'web_gemini';
 export type TTSMode = 'gemini_tts' | 'openai_tts' | 'macos_speech';
 export type YouTubeVisibility = 'unlisted' | 'private' | 'public';
 export type AutoPublishMode = 'full_auto' | 'manual_confirm';
+export type YtToXMediaMode = 'link_only' | 'link_and_video';
 
 export interface PublishSettings {
   youtubeChannelName: string;
@@ -358,6 +359,8 @@ export interface PublishSettings {
   xAccountHandle: string;
   xHashtags: string;
   xAttachVideo: boolean;
+  /** For YT -> X auto-linking, attach only the YouTube link (default) or also attach the MP4 video. */
+  ytToXMediaMode: YtToXMediaMode;
   /** 'full_auto' clicks final Publish/Post button automatically; 'manual_confirm' stops before final button. */
   autoPublishMode: AutoPublishMode;
   /** Automatically publish to YouTube once episode audio generation finishes. */
@@ -375,7 +378,8 @@ export const DEFAULT_PUBLISH_SETTINGS: PublishSettings = {
   youtubeHashtags: '#agentCast #AIポッドキャスト #テックニュース',
   xAccountHandle: '',
   xHashtags: '#agentCast #AIラジオ',
-  xAttachVideo: true,
+  xAttachVideo: false,
+  ytToXMediaMode: 'link_only',
   autoPublishMode: 'full_auto',
   autoPublishAfterGenerateYouTube: false,
   autoPublishAfterGenerateX: false,

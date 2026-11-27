@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   buildXPostPayload,
   readBlobChunkAsBase64,
+  shouldAttachVideoToXPost,
 } from '../src/shared/publish-utils';
 import {
   injectXPublishHelper,
@@ -81,6 +82,44 @@ describe('auto-publish payload & helpers', () => {
     const payload = buildXPostPayload(ep, { ...DEFAULT_PUBLISH_SETTINGS, xIncludeYouTubeUrl: false });
 
     expect(payload.postText).not.toContain('youtu.be');
+  });
+
+  it('defaults YT -> X auto-link to link_only (no MP4 attached to X) and allows opt-in link_and_video', () => {
+    expect(DEFAULT_PUBLISH_SETTINGS.ytToXMediaMode).toBe('link_only');
+    expect(DEFAULT_PUBLISH_SETTINGS.xAttachVideo).toBe(false);
+
+    // Default: YT -> X auto-link skips MP4 video attachment on X even if legacy xAttachVideo is true
+    expect(
+      shouldAttachVideoToXPost(
+        { ytToXMediaMode: DEFAULT_PUBLISH_SETTINGS.ytToXMediaMode, xAttachVideo: true },
+        { isYtToXAutoLink: true, hasVideo: true }
+      )
+    ).toBe(false);
+
+    // Opt-in: link_and_video attaches MP4 video on X when video is available
+    expect(
+      shouldAttachVideoToXPost(
+        { ytToXMediaMode: 'link_and_video', xAttachVideo: false },
+        { isYtToXAutoLink: true, hasVideo: true }
+      )
+    ).toBe(true);
+    expect(
+      shouldAttachVideoToXPost(
+        { ytToXMediaMode: 'link_and_video', xAttachVideo: true },
+        { isYtToXAutoLink: true, hasVideo: false }
+      )
+    ).toBe(false);
+
+    // Standalone X post respects xAttachVideo
+    expect(
+      shouldAttachVideoToXPost(DEFAULT_PUBLISH_SETTINGS, { isYtToXAutoLink: false, hasVideo: true })
+    ).toBe(false);
+    expect(
+      shouldAttachVideoToXPost(
+        { ytToXMediaMode: 'link_only', xAttachVideo: true },
+        { isYtToXAutoLink: false, hasVideo: true }
+      )
+    ).toBe(true);
   });
 
   it('runs YouTube Studio full-auto flow and reports extracted video URL', async () => {
