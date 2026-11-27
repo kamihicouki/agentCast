@@ -9,8 +9,8 @@ import {
   type BuildMeta,
   type DurationMode,
   type ExtensionSettings,
+  type XPostMediaMode,
   type YouTubeVisibility,
-  type YtToXMediaMode,
 } from '../../shared/types';
 import type { RuntimeRequest } from '../../shared/messages';
 import { DATA_CONSENT_REQUIRED, PRIVACY_POLICY_URL } from '../../shared/data-consent';
@@ -565,12 +565,12 @@ export function SettingsPanel({
         </div>
       </div>
 
-      {/* Publish Settings */}
-      <div className="n-card">
-        <div className="card-head-row">
-          <strong>自動投稿・公開先設定（YouTube / X）</strong>
-        </div>
-        <div style={{ marginTop: 12 }}>
+      {/* Publish Settings: separated into 3 functional zones (common / youtube / x) per rams-braun-ui */}
+      <div className="publish-zones-stack">
+        <div className="n-card">
+          <div className="rams-zone-head">
+            <span>自動投稿（共通）</span>
+          </div>
           <div className="field-row">
             <label className="field-label">自動投稿の実行モード</label>
             <select
@@ -585,18 +585,18 @@ export function SettingsPanel({
                 })
               }
             >
-              <option value="full_auto">完全自動（動画添付〜最終「公開/ポスト」ボタンまで自動）</option>
+              <option value="full_auto">完全自動（最終「公開/ポスト」ボタンまで自動）</option>
               <option value="manual_confirm">半自動（ガイド表示・手動確認して公開）</option>
             </select>
             <p className="field-hint">
-              ログイン済みの YouTube Studio / X.com セッションを使って自動投稿します（APIキー不要・実行中も画面右下の「中止」でいつでも止められます）。
+              ログイン済みの youtube studio / x.com セッションを使って自動投稿します（画面右下の「中止」でいつでも止められます）。
             </p>
           </div>
           <div className="toggle-row">
             <div>
-              <div>番組生成完了後に自動で YouTube 公開</div>
+              <div>番組生成完了後に自動で youtube 公開</div>
               <p className="field-hint">
-                音声合成が終わると自動で MP4 動画を作成し YouTube Studio へ公開します。
+                音声合成が終わると自動で mp4 動画を作成し youtube studio へ公開します。
               </p>
             </div>
             <input
@@ -620,9 +620,9 @@ export function SettingsPanel({
           </div>
           <div className="toggle-row">
             <div>
-              <div>番組生成完了後に自動で X.com 投稿</div>
+              <div>番組生成完了後に自動で x.com 投稿</div>
               <p className="field-hint">
-                YouTube 自動公開も ON の場合は、YouTube 公開完了後に動画 URL を取得してから X へ自動投稿します。
+                youtube 自動公開も on の場合は、youtube 公開完了後に動画 url を取得してから x へ自動投稿します。
               </p>
             </div>
             <input
@@ -641,11 +641,17 @@ export function SettingsPanel({
               }}
             />
           </div>
+        </div>
+
+        <div className="n-card">
+          <div className="rams-zone-head">
+            <span>youtube 設定</span>
+          </div>
           <div className="field-row">
-            <label className="field-label">YouTube チャンネルID または URL</label>
+            <label className="field-label">チャンネルid または url</label>
             <input
               className="field-input"
-              placeholder="UC... または https://www.youtube.com/channel/UC..."
+              placeholder="UC... または https://studio.youtube.com/channel/UC..."
               value={settings.publish.youtubeChannelIdOrUrl}
               onChange={(e) =>
                 void onPatchSettings({
@@ -655,7 +661,7 @@ export function SettingsPanel({
             />
           </div>
           <div className="field-row">
-            <label className="field-label">YouTube デフォルト公開範囲</label>
+            <label className="field-label">デフォルト公開範囲</label>
             <select
               className="field-select"
               value={settings.publish.youtubeDefaultVisibility}
@@ -674,7 +680,7 @@ export function SettingsPanel({
             </select>
           </div>
           <div className="field-row">
-            <label className="field-label">YouTube ハッシュタグ</label>
+            <label className="field-label">ハッシュタグ</label>
             <input
               className="field-input"
               placeholder="#agentCast #AIポッドキャスト"
@@ -686,8 +692,14 @@ export function SettingsPanel({
               }
             />
           </div>
+        </div>
+
+        <div className="n-card">
+          <div className="rams-zone-head">
+            <span>x (x.com) 設定</span>
+          </div>
           <div className="field-row">
-            <label className="field-label">X.com 投稿先ハンドル（誤爆防止チェック）</label>
+            <label className="field-label">投稿先ハンドル（誤爆防止チェック）</label>
             <input
               className="field-input"
               placeholder="@your_handle"
@@ -700,7 +712,7 @@ export function SettingsPanel({
             />
           </div>
           <div className="field-row">
-            <label className="field-label">X.com ハッシュタグ</label>
+            <label className="field-label">ハッシュタグ</label>
             <input
               className="field-input"
               placeholder="#agentCast #AIラジオ"
@@ -713,49 +725,33 @@ export function SettingsPanel({
             />
           </div>
           <div className="field-row">
-            <label className="field-label">YT → X 自動連携時の X 投稿形式</label>
+            <label className="field-label">x 投稿時のリンク・動画</label>
             <select
               className="field-select"
-              value={settings.publish.ytToXMediaMode || 'link_only'}
-              onChange={(e) =>
+              value={settings.publish.xPostMediaMode || 'link_only'}
+              onChange={(e) => {
+                const mode = e.target.value as XPostMediaMode;
+                const attachVideo = mode === 'link_and_video' || mode === 'video_only';
+                const includeYtUrl = mode === 'link_only' || mode === 'link_and_video';
                 void onPatchSettings({
                   publish: {
                     ...settings.publish,
-                    ytToXMediaMode: e.target.value as YtToXMediaMode,
+                    xPostMediaMode: mode,
+                    ytToXMediaMode: attachVideo ? 'link_and_video' : 'link_only',
+                    xAttachVideo: attachVideo,
+                    xIncludeYouTubeUrl: includeYtUrl,
                   },
-                })
-              }
+                });
+              }}
             >
-              <option value="link_only">YouTube リンク添付のみ（デフォルト・高速）</option>
-              <option value="link_and_video">YouTube リンク ＋ MP4 動画も添付</option>
+              <option value="link_only">youtube リンクのみ（デフォルト・高速）</option>
+              <option value="link_and_video">youtube リンク ＋ mp4 動画も添付</option>
+              <option value="video_only">mp4 動画のみ（youtube リンクなし）</option>
+              <option value="text_only">テキストのみ（リンク・動画なし）</option>
             </select>
             <p className="field-hint">
-              「YT → X 自動投稿」や生成後の自動連携では、YouTube 動画リンクの添付のみで十分です（必要に応じて MP4 動画の同時添付も選べます）。
+              yt → x 自動連携および x 単体投稿の両方に適用されます。youtube 公開済みならリンク添付のみで十分です。
             </p>
-          </div>
-          <div className="toggle-row">
-            <span>YouTube 公開後の動画 URL を X 投稿本文に自動挿入</span>
-            <input
-              type="checkbox"
-              checked={settings.publish.xIncludeYouTubeUrl !== false}
-              onChange={(e) =>
-                void onPatchSettings({
-                  publish: { ...settings.publish, xIncludeYouTubeUrl: e.target.checked },
-                })
-              }
-            />
-          </div>
-          <div className="toggle-row">
-            <span>X 単体投稿時に MP4 動画を自動添付</span>
-            <input
-              type="checkbox"
-              checked={Boolean(settings.publish.xAttachVideo)}
-              onChange={(e) =>
-                void onPatchSettings({
-                  publish: { ...settings.publish, xAttachVideo: e.target.checked },
-                })
-              }
-            />
           </div>
         </div>
       </div>

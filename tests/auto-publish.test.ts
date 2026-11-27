@@ -84,35 +84,61 @@ describe('auto-publish payload & helpers', () => {
     expect(payload.postText).not.toContain('youtu.be');
   });
 
-  it('defaults YT -> X auto-link to link_only (no MP4 attached to X) and allows opt-in link_and_video', () => {
+  it('defaults xPostMediaMode to link_only and supports all 4 unified X media modes', () => {
+    expect(DEFAULT_PUBLISH_SETTINGS.xPostMediaMode).toBe('link_only');
     expect(DEFAULT_PUBLISH_SETTINGS.ytToXMediaMode).toBe('link_only');
     expect(DEFAULT_PUBLISH_SETTINGS.xAttachVideo).toBe(false);
 
-    // Default: YT -> X auto-link skips MP4 video attachment on X even if legacy xAttachVideo is true
-    expect(
-      shouldAttachVideoToXPost(
-        { ytToXMediaMode: DEFAULT_PUBLISH_SETTINGS.ytToXMediaMode, xAttachVideo: true },
-        { isYtToXAutoLink: true, hasVideo: true }
-      )
-    ).toBe(false);
+    const ep = makeEpisode({ publishedYouTubeUrl: 'https://youtu.be/dQw4w9WgXcQ' });
 
-    // Opt-in: link_and_video attaches MP4 video on X when video is available
+    // 1. link_only (default): includes YouTube URL, no MP4 attached
+    expect(
+      shouldAttachVideoToXPost(DEFAULT_PUBLISH_SETTINGS, { isYtToXAutoLink: true, hasVideo: true })
+    ).toBe(false);
+    expect(
+      buildXPostPayload(ep, { ...DEFAULT_PUBLISH_SETTINGS, xPostMediaMode: 'link_only' }).postText
+    ).toContain('youtu.be');
+
+    // 2. link_and_video: includes YouTube URL AND attaches MP4
     expect(
       shouldAttachVideoToXPost(
-        { ytToXMediaMode: 'link_and_video', xAttachVideo: false },
+        { ...DEFAULT_PUBLISH_SETTINGS, xPostMediaMode: 'link_and_video' },
         { isYtToXAutoLink: true, hasVideo: true }
       )
     ).toBe(true);
     expect(
+      buildXPostPayload(ep, { ...DEFAULT_PUBLISH_SETTINGS, xPostMediaMode: 'link_and_video' })
+        .postText
+    ).toContain('youtu.be');
+
+    // 3. video_only: omits YouTube URL, attaches MP4
+    expect(
       shouldAttachVideoToXPost(
-        { ytToXMediaMode: 'link_and_video', xAttachVideo: true },
-        { isYtToXAutoLink: true, hasVideo: false }
+        { ...DEFAULT_PUBLISH_SETTINGS, xPostMediaMode: 'video_only' },
+        { isYtToXAutoLink: true, hasVideo: true }
+      )
+    ).toBe(true);
+    expect(
+      buildXPostPayload(ep, { ...DEFAULT_PUBLISH_SETTINGS, xPostMediaMode: 'video_only' }).postText
+    ).not.toContain('youtu.be');
+
+    // 4. text_only: omits YouTube URL, no MP4 attached
+    expect(
+      shouldAttachVideoToXPost(
+        { ...DEFAULT_PUBLISH_SETTINGS, xPostMediaMode: 'text_only' },
+        { isYtToXAutoLink: false, hasVideo: true }
       )
     ).toBe(false);
-
-    // Standalone X post respects xAttachVideo
     expect(
-      shouldAttachVideoToXPost(DEFAULT_PUBLISH_SETTINGS, { isYtToXAutoLink: false, hasVideo: true })
+      buildXPostPayload(ep, { ...DEFAULT_PUBLISH_SETTINGS, xPostMediaMode: 'text_only' }).postText
+    ).not.toContain('youtu.be');
+
+    // Legacy fallback without xPostMediaMode
+    expect(
+      shouldAttachVideoToXPost(
+        { ytToXMediaMode: 'link_only', xAttachVideo: true },
+        { isYtToXAutoLink: true, hasVideo: true }
+      )
     ).toBe(false);
     expect(
       shouldAttachVideoToXPost(

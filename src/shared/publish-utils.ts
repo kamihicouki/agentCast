@@ -1,6 +1,6 @@
 import { ArrayBufferTarget, Muxer } from 'mp4-muxer';
 import { db } from '../storage/db';
-import type { PodcastEpisode, PublishSettings } from './types';
+import type { PodcastEpisode, PublishSettings, XPostMediaMode } from './types';
 import { mergeAudioBlobs } from './wav-utils';
 
 export function extractYouTubeChannelId(input: string): string | null {
@@ -115,10 +115,14 @@ export function buildXPostPayload(
     .join('\n');
 
   const tags = publish.xHashtags?.trim() || '#agentCast';
-  const youtubeUrl =
-    publish.xIncludeYouTubeUrl !== false
-      ? (options?.youtubeUrl || episode.publishedYouTubeUrl || '').trim()
-      : '';
+  const mode = publish.xPostMediaMode;
+  const includeYtUrl =
+    mode === 'video_only' || mode === 'text_only'
+      ? false
+      : publish.xIncludeYouTubeUrl !== false;
+  const youtubeUrl = includeYtUrl
+    ? (options?.youtubeUrl || episode.publishedYouTubeUrl || '').trim()
+    : '';
 
   // X counts any URL as 23 weighted chars (~12 Japanese full-width chars via t.co).
   // Reserve space for the YouTube URL & tags so the URL is never truncated.
@@ -157,10 +161,18 @@ export function buildXPostPayload(
 }
 
 export function shouldAttachVideoToXPost(
-  publish: Pick<PublishSettings, 'xAttachVideo' | 'ytToXMediaMode'>,
+  publish: Pick<PublishSettings, 'xAttachVideo' | 'ytToXMediaMode'> & {
+    xPostMediaMode?: XPostMediaMode;
+  },
   options: { isYtToXAutoLink: boolean; hasVideo?: boolean }
 ): boolean {
   if (options.hasVideo === false) return false;
+  if (publish.xPostMediaMode) {
+    return (
+      publish.xPostMediaMode === 'link_and_video' ||
+      publish.xPostMediaMode === 'video_only'
+    );
+  }
   if (options.isYtToXAutoLink) {
     return publish.ytToXMediaMode === 'link_and_video';
   }

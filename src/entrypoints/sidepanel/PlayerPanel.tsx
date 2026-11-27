@@ -552,8 +552,9 @@ export function PlayerPanel({
                 onClick={onPublishX}
                 title={
                   settings.publish.autoPublishMode !== 'manual_confirm'
-                    ? settings.publish.xAttachVideo
-                      ? 'X.com で動画添付〜ポストまで自動実行（YouTube公開済みならURLも自動挿入）'
+                    ? settings.publish.xPostMediaMode === 'link_and_video' ||
+                      settings.publish.xPostMediaMode === 'video_only'
+                      ? 'X.com で動画添付〜ポストまで自動実行'
                       : 'X.com でポストまで自動実行（YouTube公開済みならリンクも自動挿入）'
                     : 'X.com の投稿画面を開いてガイドを表示'
                 }
@@ -567,7 +568,8 @@ export function PlayerPanel({
                 onClick={onPublishBoth}
                 style={{ gridColumn: '1 / -1' }}
                 title={
-                  settings.publish.ytToXMediaMode === 'link_and_video'
+                  settings.publish.xPostMediaMode === 'link_and_video' ||
+                  settings.publish.xPostMediaMode === 'video_only'
                     ? 'YouTube へ自動公開したあと、動画リンクと MP4 動画を添付して X.com へ連続自動投稿します'
                     : 'YouTube へ自動公開したあと、取得した動画リンクのみを添付して X.com へ自動投稿します'
                 }
