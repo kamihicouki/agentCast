@@ -119,6 +119,41 @@ export function SettingsPanel({
         </div>
       </div>
 
+      {/* Side Panel Scope */}
+      <div className="n-card">
+        <div className="card-head-row">
+          <strong>サイドパネルの表示範囲</strong>
+          <span className="mono-pill">
+            {settings.sidePanelScope === 'tab' ? '開いたタブのみ' : 'ウィンドウ全体'}
+          </span>
+        </div>
+        <p className="field-hint">
+          {settings.sidePanelScope === 'tab'
+            ? '他のタブへ切り替えるとサイドパネルが自動で隠れ、別作業の邪魔になりません。'
+            : 'どのタブに切り替えてもサイドパネルを表示し続けます（Chrome標準動作）。'}
+        </p>
+        <div className="segmented segmented-2" role="radiogroup" aria-label="サイドパネルの表示範囲">
+          <button
+            type="button"
+            role="radio"
+            aria-checked={settings.sidePanelScope !== 'tab'}
+            className={`segment ${settings.sidePanelScope !== 'tab' ? 'is-active' : ''}`}
+            onClick={() => void onPatchSettings({ sidePanelScope: 'window' })}
+          >
+            ウィンドウ全体
+          </button>
+          <button
+            type="button"
+            role="radio"
+            aria-checked={settings.sidePanelScope === 'tab'}
+            className={`segment ${settings.sidePanelScope === 'tab' ? 'is-active' : ''}`}
+            onClick={() => void onPatchSettings({ sidePanelScope: 'tab' })}
+          >
+            開いたタブのみ
+          </button>
+        </div>
+      </div>
+
       {/* AI & Voice Engine */}
       <div className="n-primary-card">
         <div className="card-head-row">

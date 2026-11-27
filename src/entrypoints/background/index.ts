@@ -21,9 +21,15 @@ import {
   type FeedItem,
   type PlaybackState,
   type PodcastEpisode,
+  type SidePanelScope,
   type SourceId,
   type TabGroupSummary,
 } from '../../shared/types';
+import {
+  computeJobProgress,
+  defaultChapterTtsSec,
+  estimateScriptGenerationSec,
+} from '../../shared/progress-utils';
 import type {
   CustomExtractRule,
   ExtractionResultPayload,
@@ -100,17 +106,86 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 let latestPlaybackState: PlaybackState = { ...INITIAL_PLAYBACK_STATE };
 let isJobRunning = false;
 let currentJobMessage = '';
+let currentJobProgress: number | null = null;
+let currentJobStartedAt: number | null = null;
+let currentJobEstimatedRemainingSec: number | null = null;
 let lastJobError = '';
+let badgeClearTimer: ReturnType<typeof setTimeout> | null = null;
 let isResynthRunning = false;
 let currentResynthMessage = '';
 let activeResynthEpisodeId: string | null = null;
 /** videoId → progress message for in-flight YouTube digests (not exclusive with patrol jobs). */
 const digestInProgress = new Map<string, string>();
 
-// Open Side Panel automatically when clicking the toolbar icon
-chrome.sidePanel
-  .setPanelBehavior({ openPanelOnActionClick: true })
-  .catch((err) => console.warn('[agentCast] sidePanel.setPanelBehavior warning:', err));
+let activeSidePanelScope: SidePanelScope = 'window';
+
+function setActionBadge(text: string, color?: string, autoClearMs?: number): void {
+  if (badgeClearTimer) {
+    clearTimeout(badgeClearTimer);
+    badgeClearTimer = null;
+  }
+  try {
+    void chrome.action?.setBadgeText?.({ text });
+    if (color) {
+      void chrome.action?.setBadgeBackgroundColor?.({ color });
+    }
+    if (autoClearMs && text) {
+      badgeClearTimer = setTimeout(() => {
+        badgeClearTimer = null;
+        if (!isJobRunning) {
+          void chrome.action?.setBadgeText?.({ text: '' });
+        }
+      }, autoClearMs);
+    }
+  } catch {
+    // Ignore if action badge API is unavailable
+  }
+}
+
+async function applySidePanelScope(scope: SidePanelScope, keepOpenTabId?: number): Promise<void> {
+  activeSidePanelScope = scope;
+  try {
+    if (scope === 'tab') {
+      let activeTabId = keepOpenTabId;
+      if (typeof activeTabId !== 'number') {
+        const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []);
+        activeTabId = activeTab?.id;
+      }
+      if (typeof activeTabId === 'number') {
+        await chrome.sidePanel.setOptions({
+          tabId: activeTabId,
+          path: 'sidepanel.html',
+          enabled: true,
+        });
+      }
+      await chrome.sidePanel.setOptions({ enabled: false });
+      await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false });
+    } else {
+      await chrome.sidePanel.setOptions({ path: 'sidepanel.html', enabled: true });
+      await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+    }
+  } catch (err) {
+    console.warn('[agentCast] sidePanel scope configuration warning:', err);
+  }
+}
+
+chrome.action?.onClicked?.addListener((tab) => {
+  if (activeSidePanelScope !== 'tab' || !tab.id) return;
+  const tabId = tab.id;
+  void chrome.sidePanel.setOptions({ tabId, path: 'sidepanel.html', enabled: true });
+  void chrome.sidePanel.open({ tabId }).catch((err) => {
+    console.warn('[agentCast] sidePanel.open warning:', err);
+  });
+});
+
+// Initialize Side Panel scope from saved settings
+void getSettings()
+  .then((s) => applySidePanelScope(s.sidePanelScope || 'window'))
+  .catch(() => {
+    void chrome.sidePanel
+      .setPanelBehavior({ openPanelOnActionClick: true })
+      .catch((err) => console.warn('[agentCast] sidePanel.setPanelBehavior warning:', err));
+  });
 
 // Guard Dev Auto-Reloader during playback, generation, resynthesis, and digest jobs!
 startDevAutoReloader(
@@ -286,9 +361,34 @@ function broadcastEvent(payload: Record<string, unknown>): void {
   chrome.runtime.sendMessage(payload).catch(() => {});
 }
 
-function updateJobProgress(message: string): void {
+function updateJobProgress(
+  message: string,
+  progress?: { percent?: number | null; estimatedRemainingSec?: number | null }
+): void {
   currentJobMessage = message;
-  broadcastEvent({ type: 'PATROL_PROGRESS', message, isJobRunning });
+  if (progress) {
+    if (progress.percent !== undefined) {
+      currentJobProgress = progress.percent;
+    }
+    if (progress.estimatedRemainingSec !== undefined) {
+      currentJobEstimatedRemainingSec = progress.estimatedRemainingSec;
+    }
+  }
+  if (isJobRunning) {
+    const badgeText =
+      typeof currentJobProgress === 'number' && currentJobProgress > 0
+        ? `${Math.min(99, Math.round(currentJobProgress))}%`
+        : '…';
+    setActionBadge(badgeText, '#D95B34');
+  }
+  broadcastEvent({
+    type: 'PATROL_PROGRESS',
+    message,
+    isJobRunning,
+    progressPercent: currentJobProgress,
+    jobStartedAt: currentJobStartedAt,
+    estimatedRemainingSec: currentJobEstimatedRemainingSec,
+  });
 }
 
 function updateResynthProgress(message: string): void {
@@ -303,8 +403,12 @@ async function runBackgroundJob(
   if (isJobRunning) return;
   isJobRunning = true;
   lastJobError = '';
-  updateJobProgress(initialMessage);
+  currentJobStartedAt = Date.now();
+  currentJobProgress = 5;
+  currentJobEstimatedRemainingSec = null;
+  updateJobProgress(initialMessage, { percent: 5, estimatedRemainingSec: null });
 
+  let failed = false;
   try {
     const res = await withServiceWorkerKeepAlive(task);
     if (res && Array.isArray(res.warnings) && res.warnings.length > 0) {
@@ -312,11 +416,20 @@ async function runBackgroundJob(
       broadcastEvent({ type: 'JOB_WARNING', message: lastJobError });
     }
   } catch (err) {
+    failed = true;
     lastJobError = err instanceof Error ? err.message : String(err);
     broadcastEvent({ type: 'JOB_ERROR', message: lastJobError });
   } finally {
     isJobRunning = false;
+    currentJobProgress = null;
+    currentJobStartedAt = null;
+    currentJobEstimatedRemainingSec = null;
     updateJobProgress('');
+    if (failed) {
+      setActionBadge('!', '#C62828', 60_000);
+    } else {
+      setActionBadge('OK', '#2E7D32', 15_000);
+    }
     broadcastEvent({ type: 'JOB_FINISHED', error: lastJobError });
   }
 }
@@ -492,7 +605,8 @@ async function patrolTabs(
   for (let i = 0; i < readableTabs.length; i++) {
     const t = readableTabs[i];
     updateJobProgress(
-      `${progressLabel} (${i + 1}/${readableTabs.length}): ${(t.title || t.url).slice(0, 28)}…`
+      `${progressLabel} (${i + 1}/${readableTabs.length}): ${(t.title || t.url).slice(0, 28)}…`,
+      computeJobProgress('patrol', { current: i, total: readableTabs.length })
     );
 
     const extracted = await extractFromTab(t.id, 0);
@@ -1016,8 +1130,26 @@ async function generateEpisodeFromItems(
     sourceCount: queueItems.length,
   };
 
+  let effectiveTts = settings.ttsMode;
+  if (effectiveTts === 'gemini_tts' && !settings.geminiApiKey.trim()) {
+    effectiveTts = 'macos_speech';
+  } else if (effectiveTts === 'openai_tts' && !settings.openaiApiKey.trim()) {
+    effectiveTts = 'macos_speech';
+  }
+  const hasCloudTts = effectiveTts !== 'macos_speech';
+  const estScriptSec = estimateScriptGenerationSec(
+    queueItems.length,
+    settings.targetDurationMin || 10
+  );
+  const initialChapterSec = defaultChapterTtsSec(effectiveTts);
+  const scriptSnap = computeJobProgress('script', {
+    hasCloudTts,
+    estimatedScriptSec: estScriptSec,
+    avgChapterTtsSec: initialChapterSec,
+  });
+
   await db.episodes.put(placeholder);
-  updateJobProgress(`${labels.providerLabel} で番組台本を作成中...`);
+  updateJobProgress(`${labels.providerLabel} で番組台本を作成中...`, scriptSnap);
   broadcastEvent({ type: 'EPISODES_UPDATED', episodeId });
 
   try {
@@ -1025,7 +1157,11 @@ async function generateEpisodeFromItems(
 
     await requireDataConsent();
     if (settings.aiMode === 'gemini_api') {
-      generated = await generateScriptWithGemini(queueItems, settings, promptOpts);
+      generated = await generateScriptWithGemini(queueItems, settings, promptOpts, {
+        onProgress: (detail) => {
+          updateJobProgress(`${labels.providerLabel}：${detail}`);
+        },
+      });
     } else if (settings.aiMode === 'openai_api') {
       generated = await generateScriptWithOpenAI(queueItems, settings, promptOpts);
     } else if (settings.aiMode === 'web_chatgpt') {
@@ -1036,13 +1172,6 @@ async function generateEpisodeFromItems(
       generated = await generateScriptViaWebSession('gemini', queueItems, settings, promptOpts, (detail) => {
         updateJobProgress(`${labels.providerLabel} で番組台本を作成中... (${detail})`);
       });
-    }
-
-    let effectiveTts = settings.ttsMode;
-    if (effectiveTts === 'gemini_tts' && !settings.geminiApiKey.trim()) {
-      effectiveTts = 'macos_speech';
-    } else if (effectiveTts === 'openai_tts' && !settings.openaiApiKey.trim()) {
-      effectiveTts = 'macos_speech';
     }
 
     const episodeWithScript: PodcastEpisode = {
@@ -1068,22 +1197,44 @@ async function generateEpisodeFromItems(
 
     if (effectiveTts !== 'macos_speech') {
       let autoPlayTriggered = false;
+      let totalTtsElapsedSec = 0;
+      let completedTtsChapters = 0;
 
       for (let i = 0; i < episodeWithScript.chapters.length; i++) {
         await requireDataConsent();
         const ch = episodeWithScript.chapters[i];
+        const avgSec =
+          completedTtsChapters > 0
+            ? totalTtsElapsedSec / completedTtsChapters
+            : initialChapterSec;
+        const ttsSnap = computeJobProgress('tts', {
+          current: i,
+          total: episodeWithScript.chapters.length,
+          hasCloudTts: true,
+          avgChapterTtsSec: avgSec,
+        });
         const progressText = `チャプター ${i + 1}/${episodeWithScript.chapters.length}「${ch.title.slice(0, 20)}」を音声合成中...`;
         episodeWithScript.statusDetail = progressText;
         episodeWithScript.updatedAt = new Date().toISOString();
-        updateJobProgress(progressText);
+        updateJobProgress(progressText, ttsSnap);
         await db.episodes.put({ ...episodeWithScript });
         broadcastEvent({ type: 'EPISODES_UPDATED', episodeId });
 
+        const chStart = Date.now();
         try {
           const audioRes =
             effectiveTts === 'gemini_tts'
-              ? await synthesizeChapterWithGeminiTts(ch, settings)
+              ? await synthesizeChapterWithGeminiTts(ch, settings, {
+                  onProgress: (detail) => {
+                    updateJobProgress(
+                      `チャプター ${i + 1}/${episodeWithScript.chapters.length}：${detail}`
+                    );
+                  },
+                })
               : await synthesizeChapterWithOpenAITts(ch, settings);
+
+          totalTtsElapsedSec += Math.max(1, (Date.now() - chStart) / 1000);
+          completedTtsChapters++;
 
           await db.chapterAudio.put({
             chapterKey: makeChapterKey(episodeId, i),
@@ -1126,6 +1277,7 @@ async function generateEpisodeFromItems(
       await playEpisodeInOffscreen(episodeWithScript, 0, settings.playbackRate);
     }
 
+    updateJobProgress('番組が完成しました！', computeJobProgress('done'));
     await markItemsConsumed(
       queueItems.map((i) => i.id),
       episodeId
@@ -1678,10 +1830,16 @@ function handleRequest(
       return false;
 
     case 'GET_JOB_STATUS':
+      if (!isJobRunning) {
+        setActionBadge('');
+      }
       sendResponse({
         ok: true,
         isJobRunning,
         message: currentJobMessage,
+        progressPercent: currentJobProgress,
+        jobStartedAt: currentJobStartedAt,
+        estimatedRemainingSec: currentJobEstimatedRemainingSec,
         lastError: lastJobError,
         isResynthRunning,
         resynthMessage: currentResynthMessage,
@@ -1785,6 +1943,9 @@ function handleRequest(
     case 'UPDATE_SETTINGS':
       void (async () => {
         const updated = await saveSettings(message.settings);
+        if (message.settings.sidePanelScope) {
+          await applySidePanelScope(updated.sidePanelScope || 'window', sender.tab?.id);
+        }
         await syncDailyAlarm();
         sendResponse({ ok: true, settings: updated });
       })().catch((error: Error) => sendResponse({ ok: false, error: error.message }));

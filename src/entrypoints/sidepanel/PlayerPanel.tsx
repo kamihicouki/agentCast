@@ -10,6 +10,7 @@ import {
   type PodcastEpisode,
   type TTSMode,
 } from '../../shared/types';
+import { formatElapsedTime, formatRemainingTime } from '../../shared/progress-utils';
 
 export interface ResynthesizeRequest {
   episodeId: string;
@@ -62,6 +63,9 @@ interface PlayerPanelProps {
   enabledSourceCount?: number;
   isEngineReady?: boolean;
   busyMessage?: string;
+  jobProgressPercent?: number | null;
+  jobStartedAt?: number | null;
+  jobEstimatedRemainingSec?: number | null;
   onPatrolAndPlay?: () => void;
   onGoToSettings?: () => void;
 }
@@ -127,6 +131,9 @@ export function PlayerPanel({
   enabledSourceCount,
   isEngineReady = true,
   busyMessage = '',
+  jobProgressPercent = null,
+  jobStartedAt = null,
+  jobEstimatedRemainingSec = null,
   onPatrolAndPlay,
   onGoToSettings,
 }: PlayerPanelProps) {
@@ -188,6 +195,29 @@ export function PlayerPanel({
     settings.durationMode === 'auto' ? 'おまかせ尺' : `${settings.targetDurationMin || 10}分`;
   const pipelineStage = inferPipelineStage(isJobRunning, busyMessage, displayedEpisode, isPlayingNow);
 
+  const [elapsedSec, setElapsedSec] = useState(0);
+  useEffect(() => {
+    if (!isJobRunning) {
+      setElapsedSec(0);
+      return;
+    }
+    const baseStart = jobStartedAt || Date.now();
+    const update = () => setElapsedSec(Math.max(0, Math.floor((Date.now() - baseStart) / 1000)));
+    update();
+    const timer = window.setInterval(update, 1000);
+    return () => window.clearInterval(timer);
+  }, [isJobRunning, jobStartedAt]);
+
+  const effectivePercent =
+    typeof jobProgressPercent === 'number'
+      ? Math.max(0, Math.min(100, Math.round(jobProgressPercent)))
+      : pipelineStage === 2
+        ? 45
+        : pipelineStage === 1
+          ? 12
+          : 5;
+  const remainingLabel = formatRemainingTime(jobEstimatedRemainingSec);
+
   return (
     <section className="step-section" aria-label="聴く・ワンクリック番組作成">
       {/* ==================== ONE-CLICK BROADCAST UNIT ==================== */}
@@ -213,7 +243,14 @@ export function PlayerPanel({
             disabled={isJobRunning || enabledSourceCount === 0}
             onClick={onPatrolAndPlay}
           >
-            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <svg
+              width="15"
+              height="15"
+              viewBox="0 0 16 16"
+              fill="none"
+              aria-hidden="true"
+              className={isJobRunning ? 'icon-spin' : undefined}
+            >
               {isJobRunning ? (
                 <circle
                   cx="8"
@@ -229,7 +266,7 @@ export function PlayerPanel({
             </svg>
             <span>
               {isJobRunning
-                ? '巡回・番組を作成中…'
+                ? `作成中… (${effectivePercent}%)`
                 : enabledSourceCount === 0
                   ? '巡回ソースを1つ以上有効にしてください'
                   : '巡回して番組を作成・再生'}
@@ -270,6 +307,18 @@ export function PlayerPanel({
                 <div className={`pipeline-step ${pipelineStage === 3 ? 'is-active' : ''}`}>
                   <span className="pipeline-step-num">03</span>
                   <span>再生</span>
+                </div>
+              </div>
+              <div className="job-progress-wrap" role="progressbar" aria-valuenow={effectivePercent} aria-valuemin={0} aria-valuemax={100}>
+                <div className="job-progress-bar">
+                  <div className="job-progress-fill" style={{ width: `${effectivePercent}%` }} />
+                </div>
+                <div className="job-progress-meta">
+                  <span className="job-progress-pct">{effectivePercent}%</span>
+                  <span>
+                    経過 {formatElapsedTime(elapsedSec)}
+                    {remainingLabel ? ` · ${remainingLabel}` : ''}
+                  </span>
                 </div>
               </div>
               {busyMessage && <p className="pipeline-live-msg">{busyMessage}</p>}

@@ -491,10 +491,15 @@ export interface ExtensionSettings {
   youtubeOnlyActiveInPatrol: boolean;
   /** Max X accounts visited per radar run (tab-based, rate-friendly). */
   radarMaxXAccountsPerRun: number;
+  /** 'window' keeps side panel open across all tabs; 'tab' shows it only on the tab where it was opened. */
+  sidePanelScope?: SidePanelScope;
 }
+
+export type SidePanelScope = 'window' | 'tab';
 
 export const DEFAULT_SETTINGS: ExtensionSettings = {
   theme: 'braun',
+  sidePanelScope: 'window',
   aiMode: 'gemini_api',
   ttsMode: 'gemini_tts',
   geminiApiKey: '',

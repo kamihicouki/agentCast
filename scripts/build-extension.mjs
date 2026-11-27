@@ -212,7 +212,7 @@ function generateManifest() {
 
 function writeBuildMeta(buildId) {
   const hash = crypto.createHash('sha1');
-  for (const file of ['manifest.json', 'background.js', 'content.js', 'sidepanel.html', 'offscreen.html']) {
+  for (const file of ['manifest.json', 'background.js', 'content.js', 'sidepanel.html', 'offscreen.html', 'help.html']) {
     const p = path.join(outDir, file);
     if (fs.existsSync(p)) {
       hash.update(fs.readFileSync(p));
@@ -259,7 +259,7 @@ async function buildOnce() {
   fs.rmSync(outDir, { recursive: true, force: true });
   fs.mkdirSync(outDir, { recursive: true });
 
-  // 1. Multi-page HTML entries: sidepanel.html + offscreen.html (deterministic asset names for Drive sync!)
+  // 1. Multi-page HTML entries: sidepanel.html + offscreen.html + help.html (deterministic asset names for Drive sync!)
   await build({
     root: rootDir,
     configFile: false,
@@ -275,6 +275,7 @@ async function buildOnce() {
         input: {
           sidepanel: path.resolve(rootDir, 'sidepanel.html'),
           offscreen: path.resolve(rootDir, 'offscreen.html'),
+          help: path.resolve(rootDir, 'help.html'),
         },
         output: {
           entryFileNames: 'assets/[name].js',
@@ -370,7 +371,7 @@ if (isWatch) {
     }
   };
 
-  for (const watchTarget of ['src', 'sidepanel.html', 'offscreen.html']) {
+  for (const watchTarget of ['src', 'sidepanel.html', 'offscreen.html', 'help.html']) {
     const absTarget = path.join(rootDir, watchTarget);
     if (!fs.existsSync(absTarget)) continue;
     fs.watch(absTarget, { recursive: fs.statSync(absTarget).isDirectory() }, (_event, filename) => {

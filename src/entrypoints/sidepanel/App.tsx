@@ -45,6 +45,7 @@ import { SettingsPanel } from './SettingsPanel';
 import { PatrolPanel } from './PatrolPanel';
 import { QueuePanel } from './QueuePanel';
 import { PlayerPanel, type ResynthesizeRequest } from './PlayerPanel';
+import { formatRemainingTime } from '../../shared/progress-utils';
 
 type ActiveTab = 'listen' | 'sources' | 'settings';
 type SourcesSubTab = 'patrol' | 'queue';
@@ -176,6 +177,9 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
   const [isResynthRunning, setIsResynthRunning] = useState<boolean>(false);
   const [isExporting, setIsExporting] = useState<boolean>(false);
   const [busyMessage, setBusyMessage] = useState<string>('');
+  const [jobProgressPercent, setJobProgressPercent] = useState<number | null>(null);
+  const [jobStartedAt, setJobStartedAt] = useState<number | null>(null);
+  const [jobEstimatedRemainingSec, setJobEstimatedRemainingSec] = useState<number | null>(null);
   const [resynthMessage, setResynthMessage] = useState<string>('');
   const [exportMessage, setExportMessage] = useState<string>('');
   const [toastMessage, setToastMessage] = useState<string>('');
@@ -267,6 +271,11 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
         if (res?.ok) {
           setIsJobRunning(Boolean(res.isJobRunning));
           if (res.message) setBusyMessage(res.message);
+          if (typeof res.progressPercent === 'number') setJobProgressPercent(res.progressPercent);
+          if (typeof res.jobStartedAt === 'number') setJobStartedAt(res.jobStartedAt);
+          if (typeof res.estimatedRemainingSec === 'number') {
+            setJobEstimatedRemainingSec(res.estimatedRemainingSec);
+          }
           if (res.lastError) setErrorBanner(res.lastError);
           setIsResynthRunning(Boolean(res.isResynthRunning));
           if (res.resynthMessage) setResynthMessage(res.resynthMessage);
@@ -312,6 +321,15 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
         if (typeof msg.isJobRunning === 'boolean') {
           setIsJobRunning(msg.isJobRunning);
         }
+        if (typeof msg.progressPercent === 'number' || msg.progressPercent === null) {
+          setJobProgressPercent(msg.progressPercent as number | null);
+        }
+        if (typeof msg.jobStartedAt === 'number' || msg.jobStartedAt === null) {
+          setJobStartedAt(msg.jobStartedAt as number | null);
+        }
+        if (typeof msg.estimatedRemainingSec === 'number' || msg.estimatedRemainingSec === null) {
+          setJobEstimatedRemainingSec(msg.estimatedRemainingSec as number | null);
+        }
       } else if (msg?.type === 'RESYNTH_PROGRESS') {
         setResynthMessage(typeof msg.message === 'string' ? msg.message : '');
         if (typeof msg.isResynthRunning === 'boolean') {
@@ -329,11 +347,17 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
         setErrorBanner(msg.message);
         setIsJobRunning(false);
         setBusyMessage('');
+        setJobProgressPercent(null);
+        setJobStartedAt(null);
+        setJobEstimatedRemainingSec(null);
       } else if (msg?.type === 'JOB_WARNING' && typeof msg.message === 'string') {
         setErrorBanner(msg.message);
       } else if (msg?.type === 'JOB_FINISHED') {
         setIsJobRunning(false);
         setBusyMessage('');
+        setJobProgressPercent(null);
+        setJobStartedAt(null);
+        setJobEstimatedRemainingSec(null);
         void refreshData();
         void refreshTabGroups();
       } else if (msg?.type === 'DEV_BUILD_UPDATE_AVAILABLE' && msg.pendingBuild) {
@@ -900,6 +924,23 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
                 );
               })}
             </div>
+            <button
+              id="btn-open-help"
+              type="button"
+              className="header-help-btn"
+              title="使い方ガイドを開く"
+              aria-label="使い方ガイドを開く"
+              onClick={() => {
+                const url = chrome.runtime.getURL('help.html');
+                if (chrome.tabs?.create) {
+                  void chrome.tabs.create({ url });
+                } else {
+                  window.open(url, '_blank', 'noopener');
+                }
+              }}
+            >
+              ?
+            </button>
           </div>
         </div>
 
@@ -934,13 +975,57 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
         </nav>
       </header>
 
-      {(toastMessage ||
+      {((isJobRunning && tab !== 'listen') ||
+        toastMessage ||
         resynthMessage ||
         exportMessage ||
         publishStatus?.running ||
         errorBanner ||
         displayedEpisode?.errorMessage) && (
         <div className="banner-stack">
+          {isJobRunning && tab !== 'listen' && (
+            <div className="global-job-banner" role="status">
+              <div className="global-job-banner-row">
+                <svg
+                  width="13"
+                  height="13"
+                  viewBox="0 0 16 16"
+                  fill="none"
+                  aria-hidden="true"
+                  className="icon-spin"
+                >
+                  <circle
+                    cx="8"
+                    cy="8"
+                    r="5.5"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeDasharray="22 12"
+                  />
+                </svg>
+                <span className="global-job-banner-text">
+                  {busyMessage || 'バックグラウンドで作成中…'}
+                </span>
+                <span className="job-progress-pct">
+                  {typeof jobProgressPercent === 'number' ? `${Math.round(jobProgressPercent)}%` : '…'}
+                </span>
+              </div>
+              <div className="job-progress-bar">
+                <div
+                  className="job-progress-fill"
+                  style={{
+                    width: `${typeof jobProgressPercent === 'number' ? Math.max(5, Math.min(100, Math.round(jobProgressPercent))) : 15}%`,
+                  }}
+                />
+              </div>
+              {formatRemainingTime(jobEstimatedRemainingSec) && (
+                <div className="job-progress-meta">
+                  <span>バックグラウンド実行中（閉じても継続します）</span>
+                  <span>{formatRemainingTime(jobEstimatedRemainingSec)}</span>
+                </div>
+              )}
+            </div>
+          )}
           {toastMessage && (
             <div className="status-banner" role="status">
               <span>{toastMessage}</span>
@@ -1030,6 +1115,9 @@ function AgentCastStudio({ onRevokeConsent }: { onRevokeConsent?: () => Promise<
             enabledSourceCount={enabledSourceCount}
             isEngineReady={isEngineReady}
             busyMessage={busyMessage}
+            jobProgressPercent={jobProgressPercent}
+            jobStartedAt={jobStartedAt}
+            jobEstimatedRemainingSec={jobEstimatedRemainingSec}
             onPatrolAndPlay={() => void handlePatrolAndPlay()}
             onGoToSettings={() => setTab('settings')}
           />

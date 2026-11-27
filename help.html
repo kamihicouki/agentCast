@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>agentCast 使い方ガイド</title>
+    <style>
+      :root {
+        --bg: #f5f3ee;
+        --surface: #ffffff;
+        --surface-subtle: #efece5;
+        --text: #1c1d21;
+        --text-sub: #54575f;
+        --line: #dedad0;
+        --accent: #d95b34;
+        --accent-soft: #faeae4;
+        --ok: #2e7d32;
+        --ok-soft: #e8f5e9;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #16171a;
+          --surface: #202227;
+          --surface-subtle: #282b31;
+          --text: #f2f0eb;
+          --text-sub: #a8abb3;
+          --line: #343740;
+          --accent: #e56b43;
+          --accent-soft: rgba(229, 107, 67, 0.16);
+          --ok: #66bb6a;
+          --ok-soft: rgba(102, 187, 106, 0.16);
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 32px 20px 64px;
+        font-family: -apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Noto Sans JP', sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        line-height: 1.7;
+      }
+      .container {
+        max-width: 780px;
+        margin: 0 auto;
+        display: flex;
+        flex-direction: column;
+        gap: 20px;
+      }
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        flex-wrap: wrap;
+        gap: 12px;
+        padding-bottom: 16px;
+        border-bottom: 1px solid var(--line);
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .brand-dot {
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        background: var(--accent);
+      }
+      h1 {
+        margin: 0;
+        font-size: 22px;
+        letter-spacing: -0.01em;
+      }
+      .subtitle {
+        margin: 4px 0 0;
+        font-size: 13.5px;
+        color: var(--text-sub);
+      }
+      .card {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 20px 22px;
+      }
+      h2 {
+        margin: 0 0 12px;
+        font-size: 16.5px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .badge {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 700;
+        background: var(--accent-soft);
+        color: var(--accent);
+      }
+      .badge-ok {
+        background: var(--ok-soft);
+        color: var(--ok);
+      }
+      .steps {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 12px;
+        margin-top: 8px;
+      }
+      .step-box {
+        background: var(--surface-subtle);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 14px;
+      }
+      .step-num {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 11px;
+        font-weight: 700;
+        color: var(--accent);
+        margin-bottom: 4px;
+      }
+      .step-title {
+        font-weight: 700;
+        font-size: 14px;
+        margin: 0 0 6px;
+      }
+      .step-desc {
+        margin: 0;
+        font-size: 13px;
+        color: var(--text-sub);
+      }
+      ul {
+        margin: 8px 0 0;
+        padding-left: 20px;
+      }
+      li {
+        margin-bottom: 8px;
+        font-size: 14px;
+      }
+      li strong {
+        color: var(--text);
+      }
+      .faq-item {
+        padding: 12px 0;
+        border-top: 1px solid var(--line);
+      }
+      .faq-item:first-of-type {
+        border-top: none;
+        padding-top: 4px;
+      }
+      .faq-q {
+        font-weight: 700;
+        font-size: 14.5px;
+        margin: 0 0 6px;
+      }
+      .faq-a {
+        margin: 0;
+        font-size: 13.5px;
+        color: var(--text-sub);
+      }
+      code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 12.5px;
+        padding: 1px 5px;
+        border-radius: 4px;
+        background: var(--surface-subtle);
+      }
+      footer {
+        text-align: center;
+        font-size: 12px;
+        color: var(--text-sub);
+        margin-top: 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <header>
+        <div>
+          <div class="brand">
+            <span class="brand-dot" aria-hidden="true"></span>
+            <h1>agentCast 使い方ガイド</h1>
+          </div>
+          <p class="subtitle">
+            気になる記事やフォロー中のSNS・ニュースから、2人掛け合いのラジオ番組を自動作成して聴ける Chrome 拡張機能です。
+          </p>
+        </div>
+      </header>
+
+      <section class="card">
+        <h2><span class="badge">START</span> 基本の3ステップ</h2>
+        <div class="steps">
+          <div class="step-box">
+            <div class="step-num">STEP 01</div>
+            <p class="step-title">AI・音声を設定する</p>
+            <p class="step-desc">
+              「設定」タブで Gemini API キー（または OpenAI API キー）を入力します。まずは音声だけでも試したい場合は「デモ番組を試聴」が使えます。
+            </p>
+          </div>
+          <div class="step-box">
+            <div class="step-num">STEP 02</div>
+            <p class="step-title">記事やソースを取り込む</p>
+            <p class="step-desc">
+              「巡回」タブで <strong>今のタブを取り込む</strong> か、複数タブ・X/Zenn/Note などの巡回ソースを有効にします。
+            </p>
+          </div>
+          <div class="step-box">
+            <div class="step-num">STEP 03</div>
+            <p class="step-title">番組を作成して聴く</p>
+            <p class="step-desc">
+              「聴く」タブの <strong>巡回して番組を作成・再生</strong>（または素材キューから作成）を押すと、台本と音声が自動生成されます。
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>各タブの役割</h2>
+        <ul>
+          <li>
+            <strong>聴く：</strong>
+            ワンクリックでの巡回＆番組作成、再生プレイヤー（再生速度・チャプター切替・台本ハイライト）、過去番組一覧、書き出し（音声 / HTML / Markdown / 動画）を行えます。
+          </li>
+          <li>
+            <strong>巡回（巡回ソース / 素材キュー）：</strong>
+            今開いている記事1本だけを取り込んだり、タブグループ・カスタムサイト・SNS/ニュースをまとめて収集できます。「素材キュー」では集めた記事を取捨選択して番組化できます。
+          </li>
+          <li>
+            <strong>設定：</strong>
+            外観テーマ、<strong>サイドパネルの表示範囲</strong>、AIモデル・APIキー、読み上げ音声（Gemini TTS / OpenAI TTS / ローカル音声）、番組の尺や自動巡回スケジュールを設定できます。
+          </li>
+        </ul>
+      </section>
+
+      <section class="card">
+        <h2><span class="badge badge-ok">TIPS</span> 快適に使うためのヒント</h2>
+        <ul>
+          <li>
+            <strong>サイドパネルを閉じても生成・再生は続きます：</strong>
+            番組作成や音声再生はバックグラウンドで動作します。サイドパネルを閉じている間も、Chrome ツールバーの拡張機能アイコンに <code>45%</code>（進行中）や <code>OK</code>（完了）、<code>!</code>（エラー）のバッジが表示されます。
+          </li>
+          <li>
+            <strong>他作業の邪魔になるときは「開いたタブのみ」表示に：</strong>
+            「設定」タブの <strong>サイドパネルの表示範囲</strong> を「開いたタブのみ」に変更すると、他のタブへ切り替えた際にサイドパネルが自動で隠れます。
+          </li>
+          <li>
+            <strong>進捗%と残り時間について：</strong>
+            生成中はプログレスバー・進捗%・経過時間・残り時間の目安が表示されます。外部AIの応答速度により目安時間は前後することがあります。
+          </li>
+        </ul>
+      </section>
+
+      <section class="card">
+        <h2>よくある質問・トラブルシューティング</h2>
+        <div class="faq-item">
+          <p class="faq-q">Q. 「Gemini台本生成エラー (503)」が表示されました</p>
+          <p class="faq-a">
+            Google Gemini サーバーが一時的に混雑している状態です。agentCast は自動で最大数回の再試行と代替モデル（<code>gemini-2.5-flash</code>）への切り替えを行いますが、それでも失敗する場合は少し時間をおくか、「設定」タブで別のモデルへ変更してお試しください。失敗しても素材キューの記事は消えずに残ります。
+          </p>
+        </div>
+        <div class="faq-item">
+          <p class="faq-q">Q. 記事をたくさん読み込ませると時間がかかります</p>
+          <p class="faq-a">
+            記事数が多いほど台本生成と音声合成に時間がかかります。まずは1〜3記事程度で試し、必要に応じて「素材キュー」から記事数を絞るか、番組の尺を短め（3〜5分）に設定するのがおすすめです。
+          </p>
+        </div>
+        <div class="faq-item">
+          <p class="faq-q">Q. 音声合成が失敗したり遅い場合は？</p>
+          <p class="faq-a">
+            クラウドTTS（Gemini TTS / OpenAI TTS）が一時的に使えない場合でも、自動的にブラウザ標準のローカル音声（Web Speech）へフォールバックして再生できます。「設定」タブからいつでも音声エンジンを切り替えられます。
+          </p>
+        </div>
+      </section>
+
+      <footer>agentCast — Personal Podcast Studio</footer>
+    </div>
+  </body>
+</html>
